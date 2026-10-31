@@ -168,3 +168,19 @@ restores the original frame. tests/blur_checker_gl.py includes an MSAA fixture;
 tests/blur_checker_vulkan.cpp is the matching shader-free Vulkan fixture.
 The latter can be compiled in the build container with Vulkan/XCB development
 headers. Optional Khronos synchronization validation is supported by the test.
+
+## HDR color stability
+
+V10 resolves HUD colors from the presented swapchain's format/color space and
+the current configuration snapshot. Surface transfer functions are applied to
+a private copy; they no longer mutate the shared instance configuration. The
+palette is refreshed on context changes, configuration replacement and explicit
+style invalidation. This addresses stale color state across HDR/SDR surfaces
+and settings reloads. HDR backdrop blur remains unsupported.
+
+After applying the native patch, run the cache regression with:
+
+```sh
+c++ -std=c++17 -I /path/to/MangoHud native/color_state_test.cpp -o /tmp/vela-color-state-test
+/tmp/vela-color-state-test
+```

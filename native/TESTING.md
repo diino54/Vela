@@ -134,3 +134,20 @@ Eleven Python unit tests and the native patch reverse-check passed. The
 V9 8-bit Vulkan pixel regression passed all five states with synchronization
 validation enabled: sharp text, stable uniform colors, unchanged outside
 region and bit-exact off-state restoration.
+
+## HDR/Alt-Tab color-state fix — 2026-10-31
+
+The game log showed A2B10G10R10 with HDR10 ST2084 (format 64, colorspace
+1000104008). No running game was available during this diagnosis. Upstream
+conversion mutated instance params only at swapchain creation; subsequent
+color updates used instance params while HUD drawing used the published
+configuration snapshot. V10 separates the surface transfer state from saved
+settings and refreshes the active context palette from the latest snapshot.
+
+Both native backends compiled. Native color-state regression passed HDR/SDR/HDR
+context switches, config replacement, dirty style invalidation, no unnecessary
+updates and snapshot immutability. Seventeen Python tests passed. The patch
+reverse-check passed. Vulkan pixel blur regression passed all five states.
+A separate live Vulkan color test passed white/red/green/white config reloads
+and exact final-frame restoration. Actual HDR Alt-Tab behavior in Stalker
+still requires an in-game check after restarting with the new library.

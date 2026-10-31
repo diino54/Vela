@@ -69,7 +69,7 @@ def main():
                     if license_file.is_file():
                         notices.extend([f'\n\n{directory.name}/{license_file.name}\n', license_file.read_text(errors='replace')])
         (destination / 'THIRD-PARTY-NOTICES.txt').write_text('\n'.join(notices))
-        (destination / 'BUILD.txt').write_text(f'MangoHud {REVISION}\nVela background patch v9 (10-bit SDR blur and diagnostics)\nFedora 44 x86_64 experimental build\n')
+        (destination / 'BUILD.txt').write_text(f'MangoHud {REVISION}\nVela background patch v10 (surface-specific HDR color state)\nFedora 44 x86_64 experimental build\n')
         print(f'Built Vela MangoHud in {destination}. Restart Vela to use it.')
 
 

@@ -38,3 +38,11 @@ Uninstall:
 ```
 python3 scripts/install.py --uninstall
 ```
+
+# Development
+
+See the [architecture map](docs/ARCHITECTURE.md),
+[visual design guide](docs/UI_DESIGN.md),
+[development and testing instructions](docs/DEVELOPMENT.md), and
+[current implementation state](docs/STATE.md).
+Agent/contributor entry point: [AGENTS.md](AGENTS.md).

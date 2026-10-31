@@ -1,58 +1,27 @@
-"""Downloadable static HUD fonts; downloads never block the UI thread."""
-from pathlib import Path
-from PySide6.QtCore import QEvent, QUrl, Qt, QRectF, QTimer, QVariantAnimation, QEasingCurve
-from PySide6.QtGui import QFont, QFontDatabase, QDesktopServices, QShortcut, QKeySequence, QPainter, QColor, QPen
-from PySide6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox, QScrollArea, QGridLayout, QLineEdit, QButtonGroup, QSizePolicy, QWidget, QGraphicsOpacityEffect, QListView
+"""Coordinate the font browser: filtering, paging, loading and modal lifecycle.
 
-from .animation import ButtonMotion, CardMotion
+Leaf widgets live in font_widgets.py; network/storage lives in google_fonts.py.
+Generation counters invalidate delayed animation/loading callbacks when users
+close, reopen or replace a page. Only visible tiles request specimen previews.
+"""
+from PySide6.QtCore import QEvent, Qt, QTimer, QVariantAnimation, QEasingCurve
+from PySide6.QtGui import QShortcut, QKeySequence, QPainter, QColor
+from PySide6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox, QScrollArea, QGridLayout, QLineEdit, QButtonGroup, QWidget, QGraphicsOpacityEffect
+
+from .animation import ButtonMotion
 from .panels import FrostedPanel
 
-from .google_fonts import GoogleFonts, font_directory, variant_label
-
-
-class FontWeightCombo(QComboBox):
-    def __init__(self):
-        super().__init__()
-        view = QListView(self)
-        view.setUniformItemSizes(True)
-        view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setView(view)
-        self.setMaxVisibleItems(7)
-        self.setStyleSheet('QComboBox { combobox-popup: 0; } QComboBox QAbstractItemView::item { min-height: 30px; }')
-    def wheelEvent(self, event):
-        # Scrolling the catalog must never change the selected font weight.
-        event.ignore()
-
-
-class FontLoading(QWidget):
-    def __init__(self, parent, surface):
-        super().__init__(parent)
-        self.surface = surface
-        self.phase = 0.
-        self.motion = QVariantAnimation(self)
-        self.motion.setStartValue(0.); self.motion.setEndValue(360.)
-        self.motion.setDuration(1100); self.motion.setLoopCount(-1)
-        self.motion.valueChanged.connect(self.advance)
-        self.hide()
-
-    def advance(self, value): self.phase = value; self.update()
-
-    def showEvent(self, event): self.motion.start(); super().showEvent(event)
-    def hideEvent(self, event): self.motion.stop(); super().hideEvent(event)
-
-    def paintEvent(self, event):
-        painter = QPainter(self); self.surface.paint_underlay(painter, self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        x, y = self.width()/2, self.height()/2-20
-        painter.setPen(QPen(QColor('#303030'), 3)); painter.drawEllipse(QRectF(x-15,y-15,30,30))
-        painter.setPen(QPen(QColor('#70a7ee'), 3, Qt.SolidLine, Qt.RoundCap))
-        painter.drawArc(QRectF(x-15,y-15,30,30), -round(self.phase*16), 100*16)
-        painter.setPen(QColor('#cccccc'))
-        painter.drawText(QRectF(0,y+30,self.width(),35),Qt.AlignCenter,'Loading fonts…')
+from .google_fonts import GoogleFonts, font_directory
+from .font_widgets import FontCard, FontLoading
+from .theme import FONT_CATALOG_STYLE
 
 
 class FontCatalog(QFrame):
+    """Child-window modal that snapshots/dims its owner and hides native GL.
+
+    apply_font(key, path) is the sole bridge back to Window. Downloads and
+    preview registration never save a user's game/global MangoHud profile.
+    """
     def __init__(self, window, apply_font):
         super().__init__(window)
         self.apply_font = apply_font
@@ -81,18 +50,7 @@ class FontCatalog(QFrame):
         self.nav_motion.setEasingCurve(QEasingCurve.OutCubic)
         self.setObjectName('fontCatalog')
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setStyleSheet("""
-            QFrame#fontCatalog { background: transparent; }
-            QFrame#fontBrowser { background: transparent; border: none; }
-            QFrame#fontSidebar { background: rgba(18, 18, 18, 100); border: none; border-radius: 9px; }
-            QFrame#fontCatalogContent, QScrollArea#fontCatalogScroll { background: transparent; border: none; }
-            QFrame#fontCard { background: #202020; border: 1px solid #303030; border-radius: 9px; }
-
-            QPushButton#fontCategory { background: transparent; border: none; text-align: left; padding: 0 12px; min-height: 36px; }
-            QPushButton#fontCategory:checked { background: transparent; color: white; }
-            QLabel#fontMeta { color: #909090; font-size: 11px; }
-            QPushButton#fontSource { background: transparent; border: none; color: #999999; font-size: 11px; padding: 0; min-height: 20px; }
-        """)
+        self.setStyleSheet(FONT_CATALOG_STYLE)
         self.panel = FrostedPanel(self, radius=12); self.panel.setObjectName('fontBrowser')
         layout = QVBoxLayout(self.panel); layout.setContentsMargins(22, 18, 22, 22); layout.setSpacing(18)
         header = QHBoxLayout()
@@ -463,63 +421,3 @@ class FontCatalog(QFrame):
         self.modal_image.setPixmap(self.panel.grab())
         self.panel.hide(); self.modal_image.show(); self.modal_image.raise_()
         self.show(); self.raise_(); self.setFocus(); self.start_modal(1.)
-
-class FontCard(QFrame):
-    def __init__(self, catalog, family):
-        super().__init__(); self.catalog = catalog; self.family = family; self.busy = False; self.setObjectName('fontCard')
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        layout = QVBoxLayout(self); layout.setContentsMargins(14, 12, 14, 12); layout.setSpacing(7)
-        name = QLabel(); name.setObjectName('panelTitle'); name.setToolTip(family.name)
-        name.setText(name.fontMetrics().elidedText(family.name, Qt.ElideRight, 180)); layout.addWidget(name)
-        meta = QLabel(f'{family.category} · {len(family.variants)} styles'); meta.setObjectName('fontMeta'); layout.addWidget(meta)
-        self.sample = QLabel('Aa 0123'); self.sample.setMinimumHeight(40); layout.addWidget(self.sample, 1)
-        self.weight = FontWeightCombo()
-        for variant in family.variants: self.weight.addItem(variant_label(variant), variant)
-        default = self.weight.findData('400'); self.weight.setCurrentIndex(max(0, default))
-        self.weight.setAccessibleName(family.name + ' weight and style'); layout.addWidget(self.weight)
-        self.action = QPushButton(); self.action.setObjectName('apply'); layout.addWidget(self.action)
-        self.info = QLabel(); self.info.setObjectName('fontMeta'); self.info.setWordWrap(False); self.info.setFixedHeight(18); layout.addWidget(self.info)
-        source = QPushButton('Google Fonts / license ↗'); source.setObjectName('fontSource'); source.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(family.source))); layout.addWidget(source)
-        self.motion = CardMotion(self)
-        self.button_motions = [ButtonMotion(button) for button in (self.action, source)]
-        self.weight.currentTextChanged.connect(self.weight_changed); self.action.clicked.connect(self.activate); self.refresh(load=False)
-
-    def variant(self): return self.weight.currentData()
-
-    def path(self): return self.family.path(self.variant())
-
-    def weight_changed(self):
-        self.catalog.font_updates.append((self.family.slug, self.variant(), True, '')); self.catalog.registration_timer.start()
-        self.motion.pulse(); self.catalog.preview_timer.start()
-
-    def load_preview(self):
-        path = self.path()
-        if not path.is_file(): path = self.family.preview_path(self.variant())
-        if not path.is_file(): return False
-        if str(path) not in self.catalog.font_ids:
-            identifier = QFontDatabase.addApplicationFont(str(path))
-            if identifier < 0:
-                path.unlink(missing_ok=True); return False
-            self.catalog.font_ids[str(path)] = identifier
-        identifier = self.catalog.font_ids[str(path)]
-        families = QFontDatabase.applicationFontFamilies(identifier)
-        if not families: return False
-        weight = int(self.variant().rstrip('i'))
-        italic = self.variant().endswith('i')
-        font = QFont(families[0], 20); font.setWeight(QFont.Weight(weight)); font.setItalic(italic); self.sample.setFont(font)
-        self.sample.setStyleSheet('font-family: "' + families[0].replace('"','') + '"; font-size: 23px; font-weight: ' + str(weight) + '; font-style: ' + ('italic' if italic else 'normal') + ';')
-        return True
-
-    def refresh(self, load=True):
-        preview = self.load_preview() if load else False
-        ready = self.path().is_file()
-        if not preview: self.sample.setStyleSheet('font-family: monospace; font-size: 23px;')
-        if not self.busy: self.action.setText('Use font' if ready else 'Download font')
-        self.info.setText('Downloaded · actual preview' if ready else 'Actual preview · not installed' if preview else 'Loading preview…')
-
-    def activate(self):
-        if self.busy: return
-        if self.path().is_file() and self.load_preview():
-            self.catalog.apply_font(self.catalog.key, str(self.path())); self.catalog.dismiss(); return
-        self.busy = True; self.weight.setEnabled(False); self.action.setEnabled(False); self.action.setText('Downloading…'); self.info.setText('Downloading font and license…')
-        self.catalog.service.download(self.family, self.variant())
