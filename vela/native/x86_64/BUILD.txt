@@ -1,0 +1,3 @@
+MangoHud a37b007e8018738270c9282c3a53b0ed7e786bcf
+Vela background patch v9 (10-bit SDR blur and diagnostics)
+Fedora 44 x86_64

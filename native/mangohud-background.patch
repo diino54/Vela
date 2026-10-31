@@ -1,0 +1,967 @@
+diff --git a/src/font.cpp b/src/font.cpp
+index eaa9102..c6a7ede 100644
+--- a/src/font.cpp
++++ b/src/font.cpp
+@@ -1,5 +1,6 @@
+ #include <cstdint>
+ #include "overlay.h"
++#include "vela_background.h"
+ #include "file_utils.h"
+ #include "font_default.h"
+ #include "IconsForkAwesome.h"
+@@ -116,5 +117,8 @@ void create_fonts(ImFontAtlas* font_atlas, const overlay_params& params, ImFont*
+    else
+       text_font = font_atlas->Fonts[0];
+ 
++   vela_background_reserve(font_atlas);
+    font_atlas->Build();
++   vela_background_bake(font_atlas, params.round_corners, params.vela_shadow_blur,
++                        params.vela_shadow_offset_x, params.vela_shadow_offset_y);
+ }
+diff --git a/src/gl/gl_hud.cpp b/src/gl/gl_hud.cpp
+index b66da92..c503436 100644
+--- a/src/gl/gl_hud.cpp
++++ b/src/gl/gl_hud.cpp
+@@ -1,3 +1,4 @@
++#include "../vela_blur.h"
+ #include <cstdlib>
+ #include <functional>
+ #include <thread>
+@@ -238,6 +239,12 @@ void imgui_render(gl_context *ctx, unsigned int width, unsigned int height)
+         std::lock_guard<std::mutex> lk(notifier.mutex);
+         overlay_new_frame(params);
+         position_layer(sw_stats, params, window_size);
++        vela_blur_available=ImGui_ImplOpenGL3_SupportsBlur();
++        static thread_local bool blur_warning=false;
++        if (!vela_blur_available && params.vela_background_blur>0 && !blur_warning) {
++            SPDLOG_WARN("Vela blur requires desktop OpenGL 3+ and gl_dont_flip=0; leaving the HUD unchanged");
++            blur_warning=true;
++        }
+         render_imgui(sw_stats, params, window_size, false);
+         overlay_end_frame();
+     }
+diff --git a/src/gl/gl_renderer.cpp b/src/gl/gl_renderer.cpp
+index 7fea63f..cf87e98 100644
+--- a/src/gl/gl_renderer.cpp
++++ b/src/gl/gl_renderer.cpp
+@@ -67,6 +67,7 @@
+ #include <spdlog/spdlog.h>
+ #include <imgui.h>
+ #include "gl_renderer.h"
++#include "../vela_blur.h"
+ #include <stdio.h>
+ #include <stdint.h>     // intptr_t
+ #include <sstream>
+@@ -318,7 +319,24 @@ static bool    ImGui_ImplOpenGL3_CreateDeviceObjects(gl_context *ctx)
+     CheckShader(ctx->VertHandle, "vertex shader");
+ 
+     ss.str(""); ss.clear();
+-    ss << g_GlslVersionString << fragment_shader;
++    std::string fragment_source=fragment_shader;
++    const std::string sample=glsl_version<130 ? "texture2D" : "texture";
++    const std::string declarations=
++        "uniform int BlurMode;\nuniform vec2 BlurStep;\nuniform vec4 BlurRegion;\n"
++        "float velaWeight(int k){if(k==-4||k==4)return 1.;if(k==-3||k==3)return 8.;"
++        "if(k==-2||k==2)return 28.;if(k==-1||k==1)return 56.;return 70.;}\n"
++        "vec3 velaBlur(vec2 inputUV) { vec2 uv=BlurRegion.xy+inputUV*BlurRegion.zw;"
++        "vec3 sum=vec3(0); float total=0;"
++        "for(int y=-4;y<=4;++y) for(int x=-4;x<=4;++x) {"
++        "float w=velaWeight(x)*velaWeight(y); sum+="+sample+
++        "(Texture,clamp(uv+vec2(float(x),float(y))*BlurStep,vec2(0),vec2(1))).rgb*w; total+=w;}"
++        "return sum/total;}\n";
++    fragment_source.insert(fragment_source.find("void main()"),declarations);
++    const std::string output=glsl_version<130 ? "gl_FragColor" : "Out_Color";
++    const std::string assignment=output+" = Frag_Color *";
++    fragment_source.insert(fragment_source.find(assignment),
++        "if(BlurMode==1) "+output+"=vec4(velaBlur(Frag_UV),Frag_Color.a); else ");
++    ss << g_GlslVersionString << fragment_source;
+     shader = ss.str();
+ 
+     const GLchar* fragment_shader_with_version[1] = { shader.c_str() };
+@@ -334,6 +352,9 @@ static bool    ImGui_ImplOpenGL3_CreateDeviceObjects(gl_context *ctx)
+     CheckProgram(ctx->ShaderHandle, "shader program");
+     SPDLOG_DEBUG("g_ShaderHandle {}", ctx->ShaderHandle);
+ 
++    ctx->BlurMode=glGetUniformLocation(ctx->ShaderHandle,"BlurMode");
++    ctx->BlurStep=glGetUniformLocation(ctx->ShaderHandle,"BlurStep");
++    ctx->BlurRegion=glGetUniformLocation(ctx->ShaderHandle,"BlurRegion");
+     ctx->AttribLocationTex = glGetUniformLocation(ctx->ShaderHandle, "Texture");
+     ctx->AttribLocationProjMtx = glGetUniformLocation(ctx->ShaderHandle, "ProjMtx");
+     ctx->AttribLocationVtxPos = glGetAttribLocation(ctx->ShaderHandle, "Position");
+@@ -353,6 +374,11 @@ static bool    ImGui_ImplOpenGL3_CreateDeviceObjects(gl_context *ctx)
+ 
+ static void    ImGui_ImplOpenGL3_DestroyDeviceObjects(gl_context *ctx)
+ {
++    if (ctx->BlurTexture) glDeleteTextures(1,&ctx->BlurTexture);
++    if (ctx->BlurResolveTexture) glDeleteTextures(1,&ctx->BlurResolveTexture);
++    if (ctx->BlurFramebuffer) glDeleteFramebuffers(1,&ctx->BlurFramebuffer);
++    if (ctx->BlurResolveFramebuffer) glDeleteFramebuffers(1,&ctx->BlurResolveFramebuffer);
++    ctx->BlurTexture=ctx->BlurResolveTexture=ctx->BlurFramebuffer=ctx->BlurResolveFramebuffer=0;
+     if (ctx->VboHandle)        { glDeleteBuffers(1, &ctx->VboHandle); ctx->VboHandle = 0; }
+     if (ctx->ElementsHandle)   { glDeleteBuffers(1, &ctx->ElementsHandle); ctx->ElementsHandle = 0; }
+     if (ctx->ShaderHandle && ctx->VertHandle) { glDetachShader(ctx->ShaderHandle, ctx->VertHandle); }
+@@ -540,6 +566,7 @@ static void ImGui_ImplOpenGL3_SetupRenderState(ImDrawData* draw_data, int fb_wid
+     };
+     glUseProgram(g_current_ctx->ShaderHandle);
+     glUniform1i(g_current_ctx->AttribLocationTex, 0);
++    glUniform1i(g_current_ctx->BlurMode,0);
+     glUniformMatrix4fv(g_current_ctx->AttribLocationProjMtx, 1, GL_FALSE, &ortho_projection[0][0]);
+ 
+     if (g_GlVersion >= 330)
+@@ -561,6 +588,13 @@ static void ImGui_ImplOpenGL3_SetupRenderState(ImDrawData* draw_data, int fb_wid
+     glVertexAttribPointer(g_current_ctx->AttribLocationVtxColor, 4, GL_UNSIGNED_BYTE, GL_TRUE,  sizeof(ImDrawVert), (GLvoid*)IM_OFFSETOF(ImDrawVert, col));
+ }
+ 
++bool ImGui_ImplOpenGL3_SupportsBlur()
++{
++    return !g_IsGLES && g_GlVersion>=300 && glad_glBlitFramebuffer!=nullptr && !params.gl_dont_flip;
++}
++
++#include "vela_blur_gl.h"
++
+ // OpenGL3 Render function.
+ // (this used to be set in io.RenderDrawListsFn and called by ImGui::Render(), but you can now call this directly from your main loop)
+ // Note that this implementation is little overcomplicated because we are saving/setting up/restoring every OpenGL state explicitly, in order to be able to run within any OpenGL engine that doesn't do so.
+@@ -614,6 +648,8 @@ void    ImGui_ImplOpenGL3_RenderDrawData(ImDrawData* draw_data)
+     GLboolean last_srgb_enabled = glIsEnabled(GL_FRAMEBUFFER_SRGB);
+     GLboolean last_enable_primitive_restart = (!g_IsGLES && g_GlVersion >= 310) ? glIsEnabled(GL_PRIMITIVE_RESTART) : GL_FALSE;
+ 
++    const auto blur_region=vela_blur_region(fb_width,fb_height,draw_data->FramebufferScale.x,draw_data->FramebufferScale.y);
++    const bool blur_ready=vela_blur_available && vela_gl_capture(g_current_ctx,blur_region,fb_height);
+     // Setup desired GL state
+     // Recreate the VAO every time (this is to easily allow multiple GL contexts to be rendered to. VAO are not shared among GL contexts)
+     // The renderer would actually work without any VAO bound, but then our VertexAttrib calls would overwrite the default one currently bound.
+@@ -667,7 +703,15 @@ void    ImGui_ImplOpenGL3_RenderDrawData(ImDrawData* draw_data)
+                         glScissor((int)clip_rect.x, (int)clip_rect.y, (int)clip_rect.z, (int)clip_rect.w);
+ 
+                     // Bind texture, Draw
+-                    glBindTexture(GL_TEXTURE_2D, (GLuint)(intptr_t)pcmd->TextureId);
++                    const bool blur_command=pcmd->TextureId==vela_blur_texture();
++                    if (blur_command && !blur_ready) continue;
++                    glUniform1i(g_current_ctx->BlurMode,blur_command ? 1 : 0);
++                    if (blur_command) {
++                        const auto* c=blur_region.constants;
++                        glUniform2f(g_current_ctx->BlurStep,c[0],c[1]);
++                        glUniform4f(g_current_ctx->BlurRegion,c[4],1.f-c[5],c[6],-c[7]);
++                    }
++                    glBindTexture(GL_TEXTURE_2D,blur_command ? g_current_ctx->BlurTexture : (GLuint)(intptr_t)pcmd->TextureId);
+                     //#if IMGUI_IMPL_OPENGL_MAY_HAVE_VTX_OFFSET
+                     if (g_GlVersion >= 320) // OGL and OGL ES
+                         glDrawElementsBaseVertex(GL_TRIANGLES, (GLsizei)pcmd->ElemCount, sizeof(ImDrawIdx) == 2 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT, (void*)(intptr_t)(pcmd->IdxOffset * sizeof(ImDrawIdx)), (GLint)pcmd->VtxOffset);
+diff --git a/src/gl/gl_renderer.h b/src/gl/gl_renderer.h
+index 8cfa642..88cb2e9 100644
+--- a/src/gl/gl_renderer.h
++++ b/src/gl/gl_renderer.h
+@@ -33,6 +33,9 @@ struct gl_context
+ {
+     void *ctx;
+     GLuint FontTexture = 0;
++    GLuint BlurTexture=0, BlurResolveTexture=0, BlurFramebuffer=0, BlurResolveFramebuffer=0;
++    int BlurWidth=0, BlurHeight=0;
++    GLint BlurMode=-1, BlurStep=-1, BlurRegion=-1;
+     GLuint ShaderHandle = 0, VertHandle = 0, FragHandle = 0;
+     int AttribLocationTex = 0, AttribLocationProjMtx = 0;                                // Uniforms location
+     int AttribLocationVtxPos = 0, AttribLocationVtxUV = 0, AttribLocationVtxColor = 0; // Vertex attributes location
+@@ -43,6 +46,8 @@ struct gl_context
+ 
+ void GetOpenGLVersion(int& major, int& minor, bool& isGLES);
+ 
++bool ImGui_ImplOpenGL3_SupportsBlur();
++
+ // Backend API
+ IMGUI_IMPL_API bool     ImGui_ImplOpenGL3_Init(gl_context* ctx, const char* glsl_version = nullptr);
+ IMGUI_IMPL_API void     ImGui_ImplOpenGL3_Shutdown(gl_context* ctx);
+diff --git a/src/gpu_fdinfo.cpp b/src/gpu_fdinfo.cpp
+index c2310e1..f1ce293 100644
+--- a/src/gpu_fdinfo.cpp
++++ b/src/gpu_fdinfo.cpp
+@@ -1,3 +1,4 @@
++#include <sstream>
+ #include "gpu_fdinfo.h"
+ 
+ #ifndef TEST_ONLY
+diff --git a/src/overlay.cpp b/src/overlay.cpp
+index 3ec7d60..55481a7 100644
+--- a/src/overlay.cpp
++++ b/src/overlay.cpp
+@@ -10,6 +10,8 @@
+ #include <filesystem.h>
+ // #include <sys/stat.h>
+ #include "overlay.h"
++#include "vela_background.h"
++#include "vela_blur.h"
+ #include "cpu.h"
+ #include "gpu.h"
+ #include "hud_elements.h"
+@@ -352,6 +354,7 @@ void position_layer(struct swapchain_stats& data, const struct overlay_params& p
+    unsigned width = ImGui::GetIO().DisplaySize.x;
+    unsigned height = ImGui::GetIO().DisplaySize.y;
+    float margin = 10.0f;
++   // Shadow appearance must never change the HUD anchor or its margin.
+    if (real_params->offset_x > 0 || real_params->offset_y > 0 || real_params->enabled[OVERLAY_PARAM_ENABLED_hud_no_margin])
+       margin = 0.0f;
+ 
+@@ -664,11 +667,22 @@ void render_imgui(swapchain_stats& data, struct overlay_params& params, ImVec2&
+       config_cv.wait(lock, []{ return config_ready; });
+    }
+    // data.engine = EngineTypes::GAMESCOPE;
++   vela_blur_request.active = false;
+    HUDElements.sw_stats = &data;
+    auto real_params = get_params();
+    if (real_params)
+       HUDElements.params = real_params;
+ 
++   // Preserve the content box when adding padding. Shadow appearance does not
++   // participate in geometry; the selected screen anchor remains authoritative.
++   const auto base_padding = ImGui::GetStyle().WindowPadding;
++   const float border_padding = real_params->vela_border_alpha > 0.f && real_params->vela_border_width > 0.f && std::isfinite(real_params->vela_border_width)
++       ? std::clamp(real_params->vela_border_width, 0.f, 8.f) + 2.f : 0.f;
++   const float requested_padding = std::isfinite(real_params->vela_padding)
++       ? std::clamp(real_params->vela_padding, 0.f, 64.f) : 5.f;
++   const float content_padding = std::max(requested_padding, border_padding);
++   const float padding_delta_x = content_padding - std::max(base_padding.x, border_padding);
++   const float padding_delta_y = content_padding - std::max(base_padding.y, border_padding);
+    HUDElements.is_vulkan = is_vulkan;
+    ImGui::GetIO().FontGlobalScale = real_params->font_scale;
+    static float ralign_width = 0, old_scale = 0;
+@@ -680,6 +694,9 @@ void render_imgui(swapchain_stats& data, struct overlay_params& params, ImVec2&
+    } else {
+       window_size = ImVec2(real_params->width, real_params->height);
+    }
++   // A horizontal HUD already spans the viewport; its outer width stays fixed.
++   if (!real_params->enabled[OVERLAY_PARAM_ENABLED_horizontal])
++       window_size.x = std::max(1.f, window_size.x + 2.f * padding_delta_x);
+    unsigned height = io.DisplaySize.y;
+    auto now = Clock::now();
+ 
+@@ -692,7 +709,13 @@ void render_imgui(swapchain_stats& data, struct overlay_params& params, ImVec2&
+       table_flags = ImGuiTableFlags_NoClip | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoHostExtendX;
+ 
+    if (!real_params->no_display && !steam_focused && get_params()->table_columns){
++      ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(content_padding, content_padding));
+       ImGui::Begin("Main", &gui_open, ImGuiWindowFlags_NoDecoration);
++      vela_shadow_draw(real_params->vela_shadow_alpha, real_params->vela_shadow_color,
++                       real_params->round_corners, real_params->vela_shadow_offset_x, real_params->vela_shadow_offset_y);
++      vela_blur_draw(real_params->vela_background_blur, real_params->round_corners);
++      vela_background_draw(real_params->vela_background_noise,
++                           real_params->background_alpha, real_params->round_corners);
+       if (ImGui::BeginTable("hud", real_params->table_columns, table_flags )) {
+          HUDElements.place = 0;
+          for (auto& func : HUDElements.ordered_functions){
+@@ -718,8 +741,11 @@ void render_imgui(swapchain_stats& data, struct overlay_params& params, ImVec2&
+ 
+       if(logger->is_active())
+          ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(data.main_window_pos.x + window_size.x - 15, data.main_window_pos.y + 15), 10, real_params->engine_color, 20);
+-      window_size = ImVec2(window_size.x, ImGui::GetCursorPosY() + 10.0f);
++      vela_border_draw(real_params->vela_border_width, real_params->vela_border_alpha,
++                       real_params->vela_border_color, real_params->round_corners);
++      window_size = ImVec2(window_size.x, ImGui::GetCursorPosY() + 10.0f + padding_delta_y);
+       ImGui::End();
++      ImGui::PopStyleVar();
+       if((now - logger->last_log_end()) < 12s && !logger->is_active())
+          render_benchmark(data, params, window_size, height, now);
+    }
+diff --git a/src/overlay.frag b/src/overlay.frag
+index dc6bb00..8a1d737 100644
+--- a/src/overlay.frag
++++ b/src/overlay.frag
+@@ -8,7 +8,24 @@ layout(location = 0) in struct{
+     vec2 UV;
+ } In;
+ 
++layout(push_constant) uniform BlurConstants {
++    layout(offset=16) vec2 step; float mode; float reserved; vec4 region;
++} pc;
++float velaWeight(int k) {
++    if(k==-4||k==4) return 1.; if(k==-3||k==3) return 8.;
++    if(k==-2||k==2) return 28.; if(k==-1||k==1) return 56.; return 70.;
++}
+ void main()
+ {
+-    fColor = In.Color * vec4(1, 1, 1, texture(sTexture, In.UV.st).r);
++    if (pc.mode < .5) {
++        fColor = In.Color * vec4(1,1,1,texture(sTexture,In.UV).r);
++    } else {
++        vec2 uv=pc.region.xy+In.UV*pc.region.zw;
++        vec3 sum=vec3(0); float total=0;
++        for (int y=-4;y<=4;++y) for (int x=-4;x<=4;++x) {
++            float w=velaWeight(x)*velaWeight(y);
++            sum+=texture(sTexture,clamp(uv+vec2(x,y)*pc.step,vec2(0),vec2(1))).rgb*w; total+=w;
++        }
++        fColor=vec4(sum/total,In.Color.a);
++    }
+ }
+diff --git a/src/overlay_params.cpp b/src/overlay_params.cpp
+index bd6296d..bb02abc 100644
+--- a/src/overlay_params.cpp
++++ b/src/overlay_params.cpp
+@@ -556,6 +556,18 @@ parse_ftrace(const char *str) {
+ #define parse_autostart_log(s) parse_unsigned(s)
+ #define parse_gl_bind_framebuffer(s) parse_unsigned(s)
+ #define parse_gl_dont_flip(s) parse_unsigned(s) != 0
++#define parse_vela_background_blur(s) parse_float(s)
++#define parse_vela_padding(s) parse_float(s)
++#define parse_vela_shadow_alpha(s) parse_float(s)
++#define parse_vela_shadow_blur(s) parse_float(s)
++#define parse_vela_shadow_offset_x(s) parse_float(s)
++#define parse_vela_shadow_offset_y(s) parse_float(s)
++#define parse_vela_shadow_color(s) parse_color(s)
++#define parse_vela_border_width(s) parse_float(s)
++#define parse_vela_border_alpha(s) parse_float(s)
++#define parse_vela_border_color(s) parse_color(s)
++#define parse_vela_background_noise(s) parse_float(s)
++#define parse_vela_background_frost(s) parse_float(s)
+ #define parse_round_corners(s) parse_unsigned(s)
+ #define parse_fcat_overlay_width(s) parse_unsigned(s)
+ #define parse_fcat_screen_edge(s) parse_unsigned(s)
+@@ -870,6 +882,18 @@ static void set_param_defaults(struct overlay_params *params){
+    params->fps_color = { 0xb22222, 0xfdfd09, 0x39f900 };
+    params->fps_value = { 30, 60 };
+    params->round_corners = 0;
++   params->vela_background_noise = 0;
++   params->vela_background_frost = 0;
++   params->vela_background_blur = 0;
++   params->vela_padding = 5;
++   params->vela_shadow_alpha = 0;
++   params->vela_shadow_blur = 16;
++   params->vela_shadow_offset_x = 0;
++   params->vela_shadow_offset_y = 4;
++   params->vela_shadow_color = 0;
++   params->vela_border_width = 0;
++   params->vela_border_alpha = 1;
++   params->vela_border_color = 0x414141;
+    params->battery_color =0xff9078;
+    params->fsr_steam_sharpness = -1;
+    params->picmip = -17;
+@@ -1060,7 +1084,11 @@ parse_overlay_config(struct overlay_params *params,
+                                  params->font_file_text,
+                                  params->font_glyph_ranges,
+                                  params->font_scale,
+-                                 params->font_size_secondary
++                                 params->font_size_secondary,
++                                 params->round_corners,
++                                 params->vela_shadow_blur,
++                                 params->vela_shadow_offset_x,
++                                 params->vela_shadow_offset_y
+                                 );
+ 
+    // check if user specified an env for fps limiter instead
+diff --git a/src/overlay_params.h b/src/overlay_params.h
+index 7f0795d..3a4caa8 100644
+--- a/src/overlay_params.h
++++ b/src/overlay_params.h
+@@ -204,6 +204,18 @@ struct Tracepoint;
+    OVERLAY_PARAM_CUSTOM(table_columns)               \
+    OVERLAY_PARAM_CUSTOM(blacklist)                   \
+    OVERLAY_PARAM_CUSTOM(autostart_log)               \
++   OVERLAY_PARAM_CUSTOM(vela_background_blur)         \
++   OVERLAY_PARAM_CUSTOM(vela_padding)                 \
++   OVERLAY_PARAM_CUSTOM(vela_shadow_alpha)            \
++   OVERLAY_PARAM_CUSTOM(vela_shadow_blur)             \
++   OVERLAY_PARAM_CUSTOM(vela_shadow_offset_x)         \
++   OVERLAY_PARAM_CUSTOM(vela_shadow_offset_y)         \
++   OVERLAY_PARAM_CUSTOM(vela_shadow_color)            \
++   OVERLAY_PARAM_CUSTOM(vela_border_width)            \
++   OVERLAY_PARAM_CUSTOM(vela_border_alpha)            \
++   OVERLAY_PARAM_CUSTOM(vela_border_color)            \
++   OVERLAY_PARAM_CUSTOM(vela_background_noise)        \
++   OVERLAY_PARAM_CUSTOM(vela_background_frost)        \
+    OVERLAY_PARAM_CUSTOM(round_corners)               \
+    OVERLAY_PARAM_CUSTOM(fsr_steam_sharpness)         \
+    OVERLAY_PARAM_CUSTOM(fcat_screen_edge)            \
+@@ -295,6 +307,18 @@ struct overlay_params {
+    unsigned height;
+    int offset_x, offset_y;
+    float round_corners;
++   float vela_background_noise;
++   float vela_background_frost;
++   float vela_background_blur;
++   float vela_padding;
++   float vela_shadow_alpha;
++   float vela_shadow_blur;
++   float vela_shadow_offset_x;
++   float vela_shadow_offset_y;
++   unsigned vela_shadow_color;
++   float vela_border_width;
++   float vela_border_alpha;
++   unsigned vela_border_color;
+    unsigned vsync;
+    int gl_vsync;
+    int gl_bind_framebuffer {0};
+diff --git a/src/vulkan.cpp b/src/vulkan.cpp
+index 6bb2256..49e295c 100644
+--- a/src/vulkan.cpp
++++ b/src/vulkan.cpp
+@@ -47,6 +47,7 @@
+ #include "vk_enum_to_str.h"
+ 
+ #include "overlay.h"
++#include "vela_blur.h"
+ #include "notify.h"
+ #include "blacklist.h"
+ #include "pci_ids.h"
+@@ -125,6 +126,11 @@ struct queue_data {
+ };
+ 
+ struct overlay_draw {
++   VkImage blur_image=VK_NULL_HANDLE;
++   VkImageView blur_view=VK_NULL_HANDLE;
++   VkDeviceMemory blur_memory=VK_NULL_HANDLE;
++   VkDescriptorSet blur_descriptor=VK_NULL_HANDLE;
++   unsigned blur_width=0, blur_height=0;
+    VkCommandBuffer command_buffer;
+ 
+    VkSemaphore cross_engine_semaphore;
+@@ -143,6 +149,10 @@ struct overlay_draw {
+ 
+ /* Mapped from VkSwapchainKHR */
+ struct swapchain_data {
++   bool blur_supported=false, blur_warned=false;
++   VkColorSpaceKHR blur_colorspace{};
++   VkImageUsageFlags blur_surface_usage=0;
++   VkFormatFeatureFlags blur_format_features=0;
+    struct device_data *device;
+ 
+    VkSwapchainKHR swapchain;
+@@ -711,6 +721,8 @@ static VkDescriptorSet create_image_with_desc(struct swapchain_data *data,
+    return descriptor_set;
+ }
+ 
++#include "vela_blur_vk.h"
++
+ static void check_fonts(struct swapchain_data* data)
+ {
+    struct device_data *device_data = data->device;
+@@ -810,6 +822,9 @@ static struct overlay_draw *render_swapchain_display(struct swapchain_data *data
+       return nullptr;
+ 
+    struct overlay_draw *draw = get_overlay_draw(data, image_index);
++   const auto blur_region=vela_blur_region(data->width,data->height);
++   const bool blur_ready=vela_blur_available && vela_blur_request.active
++       && vela_vk_prepare_capture(data,draw,blur_region);
+ 
+    device_data->vtable.ResetCommandBuffer(draw->command_buffer, 0);
+ 
+@@ -833,10 +848,10 @@ static struct overlay_draw *render_swapchain_display(struct swapchain_data *data
+    VkImageMemoryBarrier imb;
+    imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    imb.pNext = nullptr;
+-   imb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+-   imb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++   imb.srcAccessMask = blur_ready ? VK_ACCESS_MEMORY_WRITE_BIT : VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++   imb.dstAccessMask = blur_ready ? VK_ACCESS_TRANSFER_READ_BIT : (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+    imb.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+-   imb.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++   imb.newLayout = blur_ready ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    imb.image = data->images[image_index];
+    imb.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    imb.subresourceRange.baseMipLevel = 0;
+@@ -846,13 +861,14 @@ static struct overlay_draw *render_swapchain_display(struct swapchain_data *data
+    imb.srcQueueFamilyIndex = present_queue->family_index;
+    imb.dstQueueFamilyIndex = device_data->graphic_queue->family_index;
+    device_data->vtable.CmdPipelineBarrier(draw->command_buffer,
+-                                          VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+-                                          VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
++                                          blur_ready ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
++                                          blur_ready ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+                                           0,          /* dependency flags */
+                                           0, nullptr, /* memory barriers */
+                                           0, nullptr, /* buffer memory barriers */
+                                           1, &imb);   /* image memory barriers */
+ 
++   if (blur_ready) vela_vk_record_capture(data,draw,image_index,blur_region);
+    device_data->vtable.CmdBeginRenderPass(draw->command_buffer, &render_pass_info,
+                                           VK_SUBPASS_CONTENTS_INLINE);
+ 
+@@ -971,6 +987,15 @@ static struct overlay_draw *render_swapchain_display(struct swapchain_data *data
+          device_data->vtable.CmdBindDescriptorSets(draw->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                    data->pipeline_layout, 0, 1, desc_set, 0, NULL);
+ #endif
++         const bool blur_command=pcmd->TextureId==vela_blur_texture();
++         if (blur_command && !blur_ready) { idx_offset+=pcmd->ElemCount; continue; }
++         VkDescriptorSet texture=blur_command ? draw->blur_descriptor : reinterpret_cast<VkDescriptorSet>(data->font_atlas->TexID);
++         device_data->vtable.CmdBindDescriptorSets(draw->command_buffer,VK_PIPELINE_BIND_POINT_GRAPHICS,
++             data->pipeline_layout,0,1,&texture,0,nullptr);
++         float fragment[8]={};
++         if (blur_command) std::copy(blur_region.constants,blur_region.constants+8,fragment);
++         device_data->vtable.CmdPushConstants(draw->command_buffer,data->pipeline_layout,
++             VK_SHADER_STAGE_FRAGMENT_BIT,16,sizeof(fragment),fragment);
+          // Draw
+          device_data->vtable.CmdDrawIndexed(draw->command_buffer, pcmd->ElemCount, 1, idx_offset, vtx_offset, 0);
+ 
+@@ -1040,7 +1065,7 @@ static struct overlay_draw *render_swapchain_display(struct swapchain_data *data
+       device_data->vtable.QueueSubmit(device_data->graphic_queue->queue, 1, &submit_info, draw->fence);
+    } else {
+       // wait in the fragment stage until the swapchain image is ready
+-      std::vector<VkPipelineStageFlags> stages_wait(n_wait_semaphores, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
++      std::vector<VkPipelineStageFlags> stages_wait(n_wait_semaphores, blur_ready ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+ 
+       VkSubmitInfo submit_info = {};
+       submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+@@ -1090,8 +1115,8 @@ static void setup_swapchain_data_pipeline(struct swapchain_data *data)
+    sampler_info.magFilter = VK_FILTER_LINEAR;
+    sampler_info.minFilter = VK_FILTER_LINEAR;
+    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+-   sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+-   sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
++   sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++   sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler_info.minLod = -1000;
+    sampler_info.maxLod = 1000;
+@@ -1102,10 +1127,10 @@ static void setup_swapchain_data_pipeline(struct swapchain_data *data)
+    /* Descriptor pool */
+    VkDescriptorPoolSize sampler_pool_size = {};
+    sampler_pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+-   sampler_pool_size.descriptorCount = 1;
++   sampler_pool_size.descriptorCount = 64;
+    VkDescriptorPoolCreateInfo desc_pool_info = {};
+    desc_pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+-   desc_pool_info.maxSets = 1;
++   desc_pool_info.maxSets = 64;
+    desc_pool_info.poolSizeCount = 1;
+    desc_pool_info.pPoolSizes = &sampler_pool_size;
+    VK_CHECK(device_data->vtable.CreateDescriptorPool(device_data->device,
+@@ -1142,15 +1167,18 @@ static void setup_swapchain_data_pipeline(struct swapchain_data *data)
+    /* Constants: we are using 'vec2 offset' and 'vec2 scale' instead of a full
+     * 3d projection matrix
+     */
+-   VkPushConstantRange push_constants[1] = {};
++   VkPushConstantRange push_constants[2] = {};
+    push_constants[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    push_constants[0].offset = sizeof(float) * 0;
+    push_constants[0].size = sizeof(float) * 4;
++   push_constants[1].stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT;
++   push_constants[1].offset=16;
++   push_constants[1].size=32;
+    VkPipelineLayoutCreateInfo layout_info = {};
+    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layout_info.setLayoutCount = 1;
+    layout_info.pSetLayouts = &data->descriptor_layout;
+-   layout_info.pushConstantRangeCount = 1;
++   layout_info.pushConstantRangeCount = 2;
+    layout_info.pPushConstantRanges = push_constants;
+    VK_CHECK(device_data->vtable.CreatePipelineLayout(device_data->device,
+                                                      &layout_info,
+@@ -1370,7 +1398,7 @@ static void setup_swapchain_data(struct swapchain_data *data,
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcAccessMask = 0;
+-   dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++   dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    VkRenderPassCreateInfo render_pass_info = {};
+    render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    render_pass_info.attachmentCount = 1;
+@@ -1467,6 +1495,7 @@ static void shutdown_swapchain_data(struct swapchain_data *data)
+    struct device_data *device_data = data->device;
+ 
+    for (auto draw : data->draws) {
++      vela_vk_destroy_capture(device_data,draw);
+       device_data->vtable.DestroySemaphore(device_data->device, draw->cross_engine_semaphore, NULL);
+       device_data->vtable.DestroySemaphore(device_data->device, draw->semaphore, NULL);
+       device_data->vtable.DestroyFence(device_data->device, draw->fence, NULL);
+@@ -1512,6 +1541,21 @@ static struct overlay_draw *before_present(struct swapchain_data *swapchain_data
+    snapshot_swapchain_frame(swapchain_data);
+ 
+    if (swapchain_data->sw_stats.n_frames > 0) {
++      vela_blur_available=swapchain_data->blur_supported &&
++          present_queue->family_index==swapchain_data->device->graphic_queue->family_index;
++      if (!vela_blur_available && get_params()->vela_background_blur>0 && !swapchain_data->blur_warned) {
++          SPDLOG_WARN("Vela blur unavailable: format={} colorspace={} copyable/filterable={} surface_usage=0x{:x} format_features=0x{:x} graphics_family={} present_family={} images={}",
++              int(swapchain_data->format), int(swapchain_data->blur_colorspace), swapchain_data->blur_supported,
++              swapchain_data->blur_surface_usage, swapchain_data->blur_format_features,
++              swapchain_data->device->graphic_queue->family_index, present_queue->family_index, swapchain_data->images.size());
++          swapchain_data->blur_warned=true;
++      }
++      if (vela_blur_available && get_params()->vela_background_blur>0 && !swapchain_data->blur_warned) {
++          SPDLOG_INFO("Vela blur enabled: format={} colorspace={} graphics_family={} present_family={}",
++              int(swapchain_data->format), int(swapchain_data->blur_colorspace),
++              swapchain_data->device->graphic_queue->family_index, present_queue->family_index);
++          swapchain_data->blur_warned=true;
++      }
+       compute_swapchain_display(swapchain_data);
+       draw = render_swapchain_display(swapchain_data, present_queue,
+                                       wait_semaphores, n_wait_semaphores,
+@@ -1572,10 +1616,34 @@ static VkResult overlay_CreateSwapchainKHR(
+       }
+    }
+ 
++   bool blur_supported=false;
++   const bool sdr=createInfo.imageColorSpace==VK_COLOR_SPACE_SRGB_NONLINEAR_KHR && (createInfo.imageFormat==VK_FORMAT_B8G8R8A8_UNORM || createInfo.imageFormat==VK_FORMAT_B8G8R8A8_SRGB
++       || createInfo.imageFormat==VK_FORMAT_R8G8B8A8_UNORM || createInfo.imageFormat==VK_FORMAT_R8G8B8A8_SRGB
++       || createInfo.imageFormat==VK_FORMAT_A2B10G10R10_UNORM_PACK32 || createInfo.imageFormat==VK_FORMAT_A2R10G10B10_UNORM_PACK32);
++   VkSurfaceCapabilitiesKHR capabilities{};
++   auto get_caps=reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(
++       instance_data->vtable.GetInstanceProcAddr(instance_data->instance,"vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
++   auto get_format=reinterpret_cast<PFN_vkGetPhysicalDeviceFormatProperties>(
++       instance_data->vtable.GetInstanceProcAddr(instance_data->instance,"vkGetPhysicalDeviceFormatProperties"));
++   VkFormatProperties format{};
++   if (get_format) get_format(device_data->physical_device,createInfo.imageFormat,&format);
++   const auto needed=VK_FORMAT_FEATURE_BLIT_SRC_BIT|VK_FORMAT_FEATURE_BLIT_DST_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
++   const bool conventional=createInfo.presentMode!=VK_PRESENT_MODE_SHARED_DEMAND_REFRESH_KHR && createInfo.presentMode!=VK_PRESENT_MODE_SHARED_CONTINUOUS_REFRESH_KHR;
++   const bool caps_valid=get_caps && get_caps(device_data->physical_device,createInfo.surface,&capabilities)==VK_SUCCESS;
++   if (sdr && conventional && caps_valid
++       && (capabilities.supportedUsageFlags&VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
++       && (format.optimalTilingFeatures&needed)==needed) {
++       createInfo.imageUsage|=VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++       blur_supported=true;
++   }
+    VkResult result = device_data->vtable.CreateSwapchainKHR(device, &createInfo, pAllocator, pSwapchain);
+    if (result != VK_SUCCESS) return result;
+    struct swapchain_data *swapchain_data = new_swapchain_data(*pSwapchain, device_data);
+    setup_swapchain_data(swapchain_data, pCreateInfo);
++   swapchain_data->blur_supported=blur_supported && swapchain_data->images.size()<32;
++   swapchain_data->blur_colorspace=createInfo.imageColorSpace;
++   swapchain_data->blur_surface_usage=capabilities.supportedUsageFlags;
++   swapchain_data->blur_format_features=format.optimalTilingFeatures;
+ 
+    const VkPhysicalDeviceProperties& prop = device_data->properties;
+    swapchain_data->sw_stats.version_vk.major = VK_VERSION_MAJOR(prop.apiVersion);
+diff --git a/src/vela_background.h b/src/vela_background.h
+new file mode 100644
+--- /dev/null
++++ b/src/vela_background.h
+@@ -0,0 +1,166 @@
++#pragma once
++// Vela experimental background. Alpha-only atlas textures work in both existing
++// MangoHud renderers, without extra GPU resources or game-frame readback.
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include "imgui.h"
++
++inline void vela_background_reserve(ImFontAtlas* atlas)
++{
++    atlas->AddCustomRectRegular(64, 64);
++    atlas->AddCustomRectRegular(512, 512);
++    atlas->AddCustomRectRegular(64, 64); // Dark grain, separate from light grain.
++}
++
++inline float vela_shape_distance(float x, float y, float radius)
++{
++    const float qx = std::abs(x - 256.f) - 160.f + radius;
++    const float qy = std::abs(y - 256.f) - 160.f + radius;
++    return std::min(std::max(qx, qy), 0.f) + std::hypot(std::max(qx, 0.f), std::max(qy, 0.f)) - radius;
++}
++
++inline void vela_background_bake(ImFontAtlas* atlas, float rounding, float blur, float offset_x, float offset_y)
++{
++    rounding = std::isfinite(rounding) ? std::clamp(rounding, 0.f, 100.f) : 0.f;
++    blur = std::isfinite(blur) ? std::clamp(blur, 0.f, 40.f) : 16.f;
++    offset_x = std::isfinite(offset_x) ? std::clamp(offset_x, -40.f, 40.f) : 0.f;
++    offset_y = std::isfinite(offset_y) ? std::clamp(offset_y, -40.f, 40.f) : 4.f;
++    unsigned char* pixels;
++    int width, height;
++    atlas->GetTexDataAsAlpha8(&pixels, &width, &height);
++    for (int index = 0; index < 3; ++index) {
++        const auto* rect = atlas->GetCustomRectByIndex(index);
++        for (int y = 0; y < rect->Height; ++y) {
++            for (int x = 0; x < rect->Width; ++x) {
++                unsigned char alpha;
++                if (index != 1) {
++                    uint32_t seed = uint32_t(x + y * 64 + 1) * 0x9e3779b9u;
++                    seed ^= seed >> 16;
++                    seed *= 0x85ebca6bu;
++                    seed ^= seed >> 13;
++                    // Difference of two samples clusters near zero; cap contrast at
++                    // 31/255 even with the opacity control at 100%.
++                    const int grain = int((seed >> 24) & 255) - int((seed >> 8) & 255);
++                    alpha = static_cast<unsigned char>(std::max(0, index == 0 ? grain : -grain) / 8);
++                } else {
++                    // A precomputed rounded shadow, with the panel's interior
++                    // knocked out so transparent backgrounds stay transparent.
++                    const float px = x + .5f, py = y + .5f;
++                    const float outside = std::clamp(vela_shape_distance(px, py, rounding) + .5f, 0.f, 1.f);
++                    const float distance = vela_shape_distance(px - offset_x, py - offset_y, rounding);
++                    const float coverage = blur > 0.f
++                        ? .5f * std::erfc(distance / (1.41421356f * std::max(.1f, blur / 3.f)))
++                        : std::clamp(.5f - distance, 0.f, 1.f);
++                    alpha = static_cast<unsigned char>(std::round(255.f * outside * coverage));
++                }
++                pixels[(rect->Y + y) * width + rect->X + x] = alpha;
++            }
++        }
++    }
++}
++
++inline float vela_background_clamp(float value)
++{
++    return std::isfinite(value) ? std::clamp(value, 0.f, 1.f) : 0.f;
++}
++
++inline void vela_background_draw(float noise, float opacity, float rounding)
++{
++    noise = vela_background_clamp(noise);
++    opacity = vela_background_clamp(opacity);
++    if (noise == 0.f || opacity == 0.f)
++        return;
++    auto* atlas = ImGui::GetIO().Fonts;
++    if (atlas->CustomRects.Size < 3)
++        return;
++    auto* draw = ImGui::GetWindowDrawList();
++    const ImVec2 pos = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
++    const float radius = std::clamp(rounding, 0.f, std::min(size.x, size.y) * .5f);
++    draw->PushClipRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), false);
++    if (noise > 0.f) {
++        ImVec2 uv0, uv1, dark_uv0, dark_uv1;
++        atlas->CalcCustomRectUV(atlas->GetCustomRectByIndex(0), &uv0, &uv1);
++        atlas->CalcCustomRectUV(atlas->GetCustomRectByIndex(2), &dark_uv0, &dark_uv1);
++        // Even tiles avoid a tiny final tile that cannot contain the outer corner.
++        const float step = std::max(64.f, radius * 2.f);
++        const int nx = std::max(1, int(std::floor(size.x / step)));
++        const int ny = std::max(1, int(std::floor(size.y / step)));
++        for (int y = 0; y < ny; ++y) {
++            for (int x = 0; x < nx; ++x) {
++                ImDrawFlags flags = ImDrawFlags_RoundCornersNone;
++                if (x == 0 && y == 0) flags |= ImDrawFlags_RoundCornersTopLeft;
++                if (x == nx-1 && y == 0) flags |= ImDrawFlags_RoundCornersTopRight;
++                if (x == 0 && y == ny-1) flags |= ImDrawFlags_RoundCornersBottomLeft;
++                if (x == nx-1 && y == ny-1) flags |= ImDrawFlags_RoundCornersBottomRight;
++                if (flags != ImDrawFlags_RoundCornersNone) flags &= ~ImDrawFlags_RoundCornersNone;
++                ImVec2 a(pos.x + size.x * x/nx, pos.y + size.y * y/ny);
++                ImVec2 b(pos.x + size.x * (x+1)/nx, pos.y + size.y * (y+1)/ny);
++                draw->AddImageRounded(atlas->TexID, a, b, uv0, uv1,
++                    IM_COL32(255,255,255, int(std::round(255.f * noise * opacity))), radius, flags);
++                draw->AddImageRounded(atlas->TexID, a, b, dark_uv0, dark_uv1,
++                    IM_COL32(0,0,0, int(std::round(255.f * noise * opacity))), radius, flags);
++            }
++        }
++    }
++    draw->PopClipRect();
++}
++
++// The border is drawn independently of background opacity and inset so that
++// thick strokes remain inside the HUD bounds instead of being clipped.
++inline void vela_border_draw(float thickness, float opacity, unsigned rgb, float rounding)
++{
++    opacity = vela_background_clamp(opacity);
++    if (!std::isfinite(thickness) || thickness <= 0.f || opacity <= 0.f)
++        return;
++    const ImVec2 pos = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
++    thickness = std::min(std::clamp(thickness, 0.f, 8.f), std::min(size.x, size.y) * .5f);
++    const float inset = thickness * .5f + .5f;
++    const float radius = std::max(0.f, std::min(rounding, std::min(size.x, size.y) * .5f) - inset);
++    const ImU32 color = IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255,
++                                int(std::round(opacity * 255.f)));
++    auto* draw = ImGui::GetWindowDrawList();
++    draw->PushClipRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), false);
++    const auto old_flags = draw->Flags;
++    draw->Flags |= ImDrawListFlags_AntiAliasedLines;
++    draw->AddRect(ImVec2(pos.x + inset, pos.y + inset),
++                  ImVec2(pos.x + size.x - inset, pos.y + size.y - inset),
++                  color, radius, 0, thickness);
++    draw->Flags = old_flags;
++    draw->PopClipRect();
++}
++
++// Nine-slice a baked shadow on the background draw list. Its clip is the whole
++// viewport, not the HUD's inner clip, so the soft edges can extend past the panel.
++inline void vela_shadow_draw(float opacity, unsigned rgb, float rounding, float offset_x, float offset_y)
++{
++    opacity = vela_background_clamp(opacity);
++    if (opacity <= 0.f)
++        return;
++    auto* atlas = ImGui::GetIO().Fonts;
++    if (atlas->CustomRects.Size < 3)
++        return;
++    rounding = std::isfinite(rounding) ? std::clamp(rounding, 0.f, 100.f) : 0.f;
++    offset_x = std::isfinite(offset_x) ? std::clamp(offset_x, -40.f, 40.f) : 0.f;
++    offset_y = std::isfinite(offset_y) ? std::clamp(offset_y, -40.f, 40.f) : 4.f;
++    const ImVec2 pos = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
++    const float edge = 96.f + rounding + std::max(std::abs(offset_x), std::abs(offset_y)) + 2.f;
++    const float ex = std::min(edge, (size.x + 192.f) * .5f);
++    const float ey = std::min(edge, (size.y + 192.f) * .5f);
++    const float xs[] = {pos.x - 96.f, pos.x - 96.f + ex, pos.x + size.x + 96.f - ex, pos.x + size.x + 96.f};
++    const float ys[] = {pos.y - 96.f, pos.y - 96.f + ey, pos.y + size.y + 96.f - ey, pos.y + size.y + 96.f};
++    const float source[] = {0.f, edge / 512.f, 1.f - edge / 512.f, 1.f};
++    ImVec2 uv0, uv1;
++    atlas->CalcCustomRectUV(atlas->GetCustomRectByIndex(1), &uv0, &uv1);
++    const ImU32 color = IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, int(std::round(opacity * 255.f)));
++    auto* draw = ImGui::GetBackgroundDrawList();
++    for (int y = 0; y < 3; ++y) {
++        for (int x = 0; x < 3; ++x) {
++            if (xs[x+1] <= xs[x] || ys[y+1] <= ys[y])
++                continue;
++            draw->AddImage(atlas->TexID, ImVec2(xs[x], ys[y]), ImVec2(xs[x+1], ys[y+1]),
++                ImVec2(uv0.x + (uv1.x-uv0.x)*source[x], uv0.y + (uv1.y-uv0.y)*source[y]),
++                ImVec2(uv0.x + (uv1.x-uv0.x)*source[x+1], uv0.y + (uv1.y-uv0.y)*source[y+1]), color);
++        }
++    }
++}
+diff --git a/src/vela_blur.h b/src/vela_blur.h
+new file mode 100644
+--- /dev/null
++++ b/src/vela_blur.h
+@@ -0,0 +1,48 @@
++#pragma once
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include "imgui.h"
++
++// Private texture tag; backends replace it with a GPU snapshot of this frame.
++inline ImTextureID vela_blur_texture() { return reinterpret_cast<ImTextureID>(uintptr_t(0x56424c55)); }
++struct VelaBlurRequest { bool active=false; ImVec2 pos{}, size{}; float radius=0; };
++inline thread_local VelaBlurRequest vela_blur_request;
++inline thread_local bool vela_blur_available = false;
++struct VelaBlurRegion {
++    int x=0, y=0, width=0, height=0, texture_width=0, texture_height=0;
++    float constants[8] = {}; // step.xy, mode, reserved, uv origin.xy, uv scale.xy
++};
++inline VelaBlurRegion vela_blur_region(int width, int height, float sx=1.f, float sy=1.f)
++{
++    VelaBlurRegion r;
++    if (!vela_blur_request.active || width<=0 || height<=0) return r;
++    const auto& q=vela_blur_request;
++    const float radius=q.radius*std::max(sx,sy);
++    const int margin=int(std::ceil(radius))+4;
++    r.x=std::clamp(int(std::floor(q.pos.x*sx))-margin,0,width);
++    r.y=std::clamp(int(std::floor(q.pos.y*sy))-margin,0,height);
++    const int right=std::clamp(int(std::ceil((q.pos.x+q.size.x)*sx))+margin,0,width);
++    const int bottom=std::clamp(int(std::ceil((q.pos.y+q.size.y)*sy))+margin,0,height);
++    r.width=right-r.x; r.height=bottom-r.y;
++    if (r.width<=0 || r.height<=0) return r;
++    r.texture_width=std::max(1,(r.width+3)/4);
++    r.texture_height=std::max(1,(r.height+3)/4);
++    r.constants[0]=radius/(4.f*r.width); r.constants[1]=radius/(4.f*r.height);
++    r.constants[2]=1;
++    r.constants[4]=(q.pos.x*sx-r.x)/r.width;
++    r.constants[5]=(q.pos.y*sy-r.y)/r.height;
++    r.constants[6]=q.size.x*sx/r.width;
++    r.constants[7]=q.size.y*sy/r.height;
++    return r;
++}
++inline void vela_blur_draw(float radius, float rounding)
++{
++    if (!vela_blur_available || !std::isfinite(radius) || radius<=0) return;
++    auto& q=vela_blur_request;
++    q.active=true; q.pos=ImGui::GetWindowPos(); q.size=ImGui::GetWindowSize();
++    q.radius=std::clamp(radius,0.f,32.f);
++    ImGui::GetBackgroundDrawList()->AddImageRounded(vela_blur_texture(),q.pos,
++        ImVec2(q.pos.x+q.size.x,q.pos.y+q.size.y),ImVec2(0,0),ImVec2(1,1),
++        IM_COL32_WHITE,std::clamp(rounding,0.f,std::min(q.size.x,q.size.y)*.5f));
++}
+diff --git a/src/vela_blur_vk.h b/src/vela_blur_vk.h
+new file mode 100644
+--- /dev/null
++++ b/src/vela_blur_vk.h
+@@ -0,0 +1,59 @@
++#pragma once
++// Included after MangoHud's image-allocation helpers. One capture per in-flight
++// overlay draw; reuse is protected by the existing per-draw fence.
++static void vela_vk_destroy_capture(device_data* device, overlay_draw* draw)
++{
++    if (draw->blur_view) device->vtable.DestroyImageView(device->device, draw->blur_view, nullptr);
++    if (draw->blur_image) device->vtable.DestroyImage(device->device, draw->blur_image, nullptr);
++    if (draw->blur_memory) device->vtable.FreeMemory(device->device, draw->blur_memory, nullptr);
++    draw->blur_view=VK_NULL_HANDLE; draw->blur_image=VK_NULL_HANDLE; draw->blur_memory=VK_NULL_HANDLE;
++}
++static bool vela_vk_prepare_capture(swapchain_data* data, overlay_draw* draw, const VelaBlurRegion& roi)
++{
++    if (roi.width<=0 || roi.height<=0) return false;
++    if (draw->blur_width==unsigned(roi.texture_width) && draw->blur_height==unsigned(roi.texture_height) && draw->blur_image)
++        return true;
++    vela_vk_destroy_capture(data->device,draw);
++    if (!draw->blur_descriptor)
++        draw->blur_descriptor=create_image_with_desc(data,roi.texture_width,roi.texture_height,data->format,
++            draw->blur_image,draw->blur_memory,draw->blur_view);
++    else
++        create_image(data,draw->blur_descriptor,roi.texture_width,roi.texture_height,data->format,
++            draw->blur_image,draw->blur_memory,draw->blur_view);
++    draw->blur_width=roi.texture_width; draw->blur_height=roi.texture_height;
++    return draw->blur_image!=VK_NULL_HANDLE;
++}
++static void vela_vk_record_capture(swapchain_data* data, overlay_draw* draw, unsigned index, const VelaBlurRegion& roi)
++{
++    auto& api=data->device->vtable;
++    VkImageMemoryBarrier destination{};
++    destination.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
++    destination.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
++    destination.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;
++    destination.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++    destination.srcQueueFamilyIndex=destination.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
++    destination.image=draw->blur_image;
++    destination.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
++    api.CmdPipelineBarrier(draw->command_buffer,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,
++        0,0,nullptr,0,nullptr,1,&destination);
++    VkImageBlit region{};
++    region.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
++    region.dstSubresource=region.srcSubresource;
++    region.srcOffsets[0]={roi.x,roi.y,0};
++    region.srcOffsets[1]={roi.x+roi.width,roi.y+roi.height,1};
++    region.dstOffsets[1]={roi.texture_width,roi.texture_height,1};
++    api.CmdBlitImage(draw->command_buffer,data->images[index],VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++        draw->blur_image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&region,VK_FILTER_LINEAR);
++    VkImageMemoryBarrier barriers[2]={destination,destination};
++    barriers[0].srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
++    barriers[0].dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
++    barriers[0].oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++    barriers[0].newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++    barriers[1].image=data->images[index];
++    barriers[1].srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT;
++    barriers[1].dstAccessMask=VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++    barriers[1].oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
++    barriers[1].newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++    api.CmdPipelineBarrier(draw->command_buffer,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
++        0,0,nullptr,0,nullptr,2,barriers);
++}
+diff --git a/src/gl/vela_blur_gl.h b/src/gl/vela_blur_gl.h
+new file mode 100644
+--- /dev/null
++++ b/src/gl/vela_blur_gl.h
+@@ -0,0 +1,55 @@
++#pragma once
++// Called inside the renderer's state backup/restore scope, before any HUD draw.
++static bool vela_gl_capture(gl_context* ctx,const VelaBlurRegion& roi,int fb_height)
++{
++    if (!vela_blur_request.active || roi.width<=0 || roi.height<=0 || !glBlitFramebuffer)
++        return false;
++    GLint read_fb,draw_fb,unpack_buffer;
++    glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING,&unpack_buffer);
++    glBindBuffer(GL_PIXEL_UNPACK_BUFFER,0);
++    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,&read_fb);
++    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&draw_fb);
++    const GLint source=params.gl_bind_framebuffer>=0 ? params.gl_bind_framebuffer : draw_fb;
++    glBindFramebuffer(GL_READ_FRAMEBUFFER,source);
++    GLint source_read_buffer;
++    glGetIntegerv(GL_READ_BUFFER,&source_read_buffer);
++    if (source==0) glReadBuffer(GL_BACK);
++    glDisable(GL_SCISSOR_TEST);
++    glDisable(GL_FRAMEBUFFER_SRGB); // Capture SDR code values; HUD renderer also writes code values.
++    if (!ctx->BlurTexture) {
++        glGenTextures(1,&ctx->BlurTexture); glGenTextures(1,&ctx->BlurResolveTexture);
++        glGenFramebuffers(1,&ctx->BlurFramebuffer); glGenFramebuffers(1,&ctx->BlurResolveFramebuffer);
++    }
++    auto allocate=[](GLuint texture,int width,int height) {
++        glBindTexture(GL_TEXTURE_2D,texture);
++        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
++        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
++        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
++        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
++        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,width,height,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
++    };
++    // Resolve at identical size first: MSAA framebuffers cannot be resolved
++    // directly into a smaller image. The second blit downsamples by four.
++    if (ctx->BlurWidth!=roi.width || ctx->BlurHeight!=roi.height) {
++        allocate(ctx->BlurResolveTexture,roi.width,roi.height);
++        allocate(ctx->BlurTexture,roi.texture_width,roi.texture_height);
++        ctx->BlurWidth=roi.width; ctx->BlurHeight=roi.height;
++    }
++    glBindFramebuffer(GL_DRAW_FRAMEBUFFER,ctx->BlurResolveFramebuffer);
++    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,ctx->BlurResolveTexture,0);
++    const bool resolve_ok=glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE;
++    if (resolve_ok)
++        glBlitFramebuffer(roi.x,fb_height-roi.y-roi.height,roi.x+roi.width,fb_height-roi.y,
++            0,0,roi.width,roi.height,GL_COLOR_BUFFER_BIT,GL_NEAREST);
++    if (source==0) glReadBuffer(source_read_buffer);
++    glBindFramebuffer(GL_READ_FRAMEBUFFER,ctx->BlurResolveFramebuffer);
++    glBindFramebuffer(GL_DRAW_FRAMEBUFFER,ctx->BlurFramebuffer);
++    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,ctx->BlurTexture,0);
++    const bool target_ok=glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE;
++    if (resolve_ok && target_ok)
++        glBlitFramebuffer(0,0,roi.width,roi.height,0,0,roi.texture_width,roi.texture_height,GL_COLOR_BUFFER_BIT,GL_LINEAR);
++    glBindBuffer(GL_PIXEL_UNPACK_BUFFER,unpack_buffer);
++    glBindFramebuffer(GL_READ_FRAMEBUFFER,read_fb);
++    glBindFramebuffer(GL_DRAW_FRAMEBUFFER,draw_fb);
++    return resolve_ok && target_ok;
++}
