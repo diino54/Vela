@@ -1,0 +1,267 @@
+--- a/source/runtime.hpp
++++ b/source/runtime.hpp
+@@ -413,6 +413,7 @@
+ 		void draw_technique_editor();
+ 
+ 		bool init_imgui_resources();
++		bool ensure_vela_blur();
+ 		void render_imgui_draw_data(api::command_list *cmd_list, ImDrawData *draw_data, api::resource_view rtv);
+ 		void destroy_imgui_resources();
+ 
+@@ -440,7 +441,15 @@
+ 		unsigned int _clock_format = 0;
+ 		unsigned int _input_processing_mode = 2;
+ 
+-		api::pipeline _imgui_pipeline = {};
++		api::resource _vela_blur_texture = {};
++        api::resource_view _vela_blur_srv = {};
++        bool _vela_blur_failed = false;
++        float _vela_blur_strength = 16.0f;
++        float _vela_blur_quality = 1.0f;
++        bool _vela_animations = true;
++        float _vela_animation_duration = .24f;
++        float _vela_animation_value = 0.0f;
++        api::pipeline _imgui_pipeline = {};
+ 		api::pipeline_layout _imgui_pipeline_layout = {};
+ 		api::sampler  _imgui_sampler_state = {};
+ 
+--- a/source/runtime_gui.cpp
++++ b/source/runtime_gui.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include "runtime.hpp"
+ #include "vela_rounding.hpp"
++#include "vela_visual.hpp"
+ #include "vela_font_scale.hpp"
+ #include "runtime_internal.hpp"
+ #include "version.h"
+@@ -323,7 +324,14 @@
+ 	config.get("OVERLAY", "ShowPresetTransitionMessage", _show_preset_transition_message);
+ 
+ 	ImGuiStyle &imgui_style = _imgui_context->Style;
+-	config.get("STYLE", "Alpha", imgui_style.Alpha);
++	config.get("VELA", "BackgroundBlur", _vela_blur_strength);
++    config.get("VELA", "BlurQuality", _vela_blur_quality);
++    config.get("VELA", "Animations", _vela_animations);
++    config.get("VELA", "AnimationDuration", _vela_animation_duration);
++    _vela_blur_strength = std::isfinite(_vela_blur_strength) ? std::clamp(_vela_blur_strength, 0.f, 32.f) : 0.f;
++    _vela_blur_quality = std::isfinite(_vela_blur_quality) ? std::clamp(_vela_blur_quality, 0.f, 2.f) : 1.f;
++    _vela_animation_duration = std::isfinite(_vela_animation_duration) ? std::clamp(_vela_animation_duration, .08f, .8f) : .24f;
++    config.get("STYLE", "Alpha", imgui_style.Alpha);
+ 	config.get("STYLE", "ChildRounding", imgui_style.ChildRounding);
+ 	config.get("STYLE", "ColFPSText", _fps_col);
+ 	config.get("STYLE", "EditorFont", _editor_font_path);
+@@ -424,7 +432,11 @@
+ 	config.set("OVERLAY", "ShowPresetTransitionMessage", _show_preset_transition_message);
+ 
+ 	const ImGuiStyle &imgui_style = _imgui_context->Style;
+-	config.set("STYLE", "Alpha", imgui_style.Alpha);
++	config.set("VELA", "BackgroundBlur", _vela_blur_strength);
++    config.set("VELA", "BlurQuality", _vela_blur_quality);
++    config.set("VELA", "Animations", _vela_animations);
++    config.set("VELA", "AnimationDuration", _vela_animation_duration);
++    config.set("STYLE", "Alpha", imgui_style.Alpha);
+ 	config.set("STYLE", "ChildRounding", imgui_style.ChildRounding);
+ 	config.set("STYLE", "ColFPSText", _fps_col);
+ 	config.set("STYLE", "EditorFont", _editor_font_path);
+@@ -804,7 +816,12 @@
+ 	if (show_overlay != _show_overlay)
+ 		open_overlay(show_overlay, show_overlay_source);
+ 
+-	const bool show_splash_window = _show_splash && (is_loading() || (_reload_count <= 1 && (_last_present_time - _last_reload_time) < std::chrono::seconds(5)) || (!_show_overlay && _tutorial_index == 0 && _input != nullptr));
++	vela_visual::transition visual{_vela_animation_value};
++    const float visual_alpha = visual.update(_show_overlay, static_cast<float>(_last_frame_duration.count() * 1e-9), _vela_animations, _vela_animation_duration);
++    _vela_animation_value = visual.value;
++    const bool draw_overlay = _show_overlay || visual_alpha > .001f;
++
++    const bool show_splash_window = _show_splash && (is_loading() || (_reload_count <= 1 && (_last_present_time - _last_reload_time) < std::chrono::seconds(5)) || (!_show_overlay && _tutorial_index == 0 && _input != nullptr));
+ 
+ 	// Do not show this message in the same frame the screenshot is taken (so that it won't show up on the GUI screenshot)
+ 	const bool show_screenshot_message = (_show_screenshot_message || !_last_screenshot_save_successful) && !_should_save_screenshot && (_last_present_time - _last_screenshot_time) < std::chrono::seconds(_last_screenshot_save_successful ? 3 : 5);
+@@ -834,7 +851,7 @@
+ 	_gather_gpu_statistics = false;
+ 	_effects_expanded_state &= 2;
+ 
+-	if (!show_splash_window && !show_message_window && !show_statistics_window && !_show_overlay && _preview_texture == std::numeric_limits<size_t>::max()
++	if (!show_splash_window && !show_message_window && !show_statistics_window && !draw_overlay && _preview_texture == std::numeric_limits<size_t>::max()
+ #if RESHADE_ADDON
+ 		&& !has_addon_event<addon_event::reshade_overlay>()
+ #endif
+@@ -1287,9 +1304,11 @@
+ 		ImGui::PopStyleColor();
+ 	}
+ 
+-	if (_show_overlay)
+-	{
+-		const ImGuiViewport *const viewport = ImGui::GetMainViewport();
++	if (draw_overlay)
++    {
++        ImGui::PushStyleVar(ImGuiStyleVar_DisabledAlpha, 1.0f);
++        ImGui::BeginDisabled(!_show_overlay);
++        const ImGuiViewport *const viewport = ImGui::GetMainViewport();
+ 
+ 		// Change font size if user presses the control key and moves the mouse wheel
+ 		if (!_no_font_scaling && imgui_io.KeyCtrl && imgui_io.MouseWheel != 0 && ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow))
+@@ -1426,6 +1445,8 @@
+ 			}
+ 			ImGui::End();
+ 		}
++        ImGui::EndDisabled();
++        ImGui::PopStyleVar();
+ 	}
+ 
+ #if RESHADE_ADDON == 1
+@@ -1500,9 +1521,13 @@
+ 	// Disable keyboard shortcuts while typing into input boxes
+ 	_ignore_shortcuts |= ImGui::IsAnyItemActive();
+ 
++    if (draw_overlay && !_is_vr && _vela_blur_strength > 0 && ensure_vela_blur())
++        vela_visual::backdrop(*_imgui_context, _vela_blur_srv.handle, static_cast<float>(_width), static_cast<float>(_height), (_renderer_id & 0x10000) != 0, visual_alpha, _imgui_context->Style.WindowRounding);
++
+ 	// Render ImGui widgets and windows
+ 	ImGui::Render();
+-	if (_show_overlay)
++    if (draw_overlay) vela_visual::animate(*_imgui_context, visual_alpha, _vela_animations);
++	if (draw_overlay)
+ 		vela_rounding::apply(*_imgui_context, *ImGui::GetDrawData(), _imgui_context->Style.WindowRounding);
+ 
+ 	if (_primary_input_handler && _input != nullptr)
+@@ -2065,6 +2090,15 @@
+ }
+ void reshade::runtime::draw_gui_settings()
+ {
++    ImGui::SeparatorText("Vela visual effects");
++    bool vela_changed = ImGui::SliderFloat("Background blur", &_vela_blur_strength, 0.f, 32.f, "%.0f px", ImGuiSliderFlags_AlwaysClamp);
++    int quality = static_cast<int>(_vela_blur_quality);
++    if (ImGui::Combo("Blur quality", &quality, "Low (9 samples)\0Balanced (25 samples)\0High (49 samples)\0")) { _vela_blur_quality = static_cast<float>(quality); vela_changed = true; }
++    vela_changed |= ImGui::Checkbox("Animate Vela interface", &_vela_animations);
++    vela_changed |= ImGui::SliderFloat("Animation duration", &_vela_animation_duration, .08f, .8f, "%.2f s", ImGuiSliderFlags_AlwaysClamp);
++    if (vela_changed) save_config();
++    ImGui::Separator();
++
+ 	if (ImGui::Button(ICON_FK_FOLDER " " + _("Open base folder in explorer"), ImVec2(ImGui::GetContentRegionAvail().x, 0)))
+ 		utils::open_explorer(_config_path);
+ 
+@@ -4734,7 +4768,7 @@
+ 			layout_params[num_layout_params++] = api::descriptor_range { 0, 0, 0, 1, api::shader_stage::pixel, 1, api::descriptor_type::shader_resource_view }; // t0
+ 		}
+ 
+-		layout_params[num_layout_params++] = api::constant_range { 0, 0, 0, 18, api::shader_stage::vertex | api::shader_stage::pixel }; // b0
++		layout_params[num_layout_params++] = api::constant_range { 0, 0, 0, 24, api::shader_stage::vertex | api::shader_stage::pixel }; // b0
+ 
+ 		if (!_device->create_pipeline_layout(num_layout_params, layout_params, &_imgui_pipeline_layout))
+ 		{
+@@ -4978,6 +5012,20 @@
+ 		_device->unmap_buffer_region(_imgui_vertices[buffer_index]);
+ 	}
+ 
++    bool capture = false;
++    if (_vela_blur_srv != 0)
++        for (const ImDrawList *list : draw_data->CmdLists)
++            for (const auto &draw : list->CmdBuffer)
++                if (!draw.UserCallback && draw.GetTexID() == _vela_blur_srv.handle) capture = true;
++    if (capture) {
++        const api::resource source = _device->get_resource_from_view(rtv);
++        cmd_list->barrier(source, api::resource_usage::render_target, api::resource_usage::copy_source);
++        cmd_list->barrier(_vela_blur_texture, api::resource_usage::shader_resource, api::resource_usage::copy_dest);
++        cmd_list->copy_resource(source, _vela_blur_texture);
++        cmd_list->barrier(_vela_blur_texture, api::resource_usage::copy_dest, api::resource_usage::shader_resource);
++        cmd_list->barrier(source, api::resource_usage::copy_source, api::resource_usage::render_target);
++    }
++
+ 	api::render_pass_render_target_desc render_target = {};
+ 	render_target.view = rtv;
+ 
+@@ -5001,6 +5049,11 @@
+ 		float ortho_projection[16];
+ 		api::color_space color_space;
+ 		float hdr_overlay_brightness;
++        float blur_texel[2];
++        float blur_strength;
++        float blur_quality;
++        float blur_enabled;
++        uint32_t blur_color_space;
+ 	} push_constants = {
+ 		{
+ 			2.0f / draw_data->DisplaySize.x, 0.0f, 0.0f, 0.0f,
+@@ -5010,7 +5063,9 @@
+ 			(flip_y ? -1 : 1) * (2 * draw_data->DisplayPos.y + draw_data->DisplaySize.y + (adjust_half_pixel ? 1.0f : 0.0f)) / draw_data->DisplaySize.y, depth_clip_zero_to_one ? 0.5f : 0.0f, 1.0f,
+ 		},
+ 		_hdr_overlay_overwrite_color_space != api::color_space::unknown ? _hdr_overlay_overwrite_color_space : _back_buffer_color_space,
+-		_hdr_overlay_brightness
++		_hdr_overlay_brightness,
++        {1.f / _width, 1.f / _height},
++        _vela_blur_strength, _vela_blur_quality, 0.f, static_cast<uint32_t>(_back_buffer_color_space)
+ 	};
+ 
+ 	const bool has_combined_sampler_and_view = _device->check_capability(api::device_caps::sampler_with_resource_view);
+@@ -5019,6 +5074,7 @@
+ 	if (!has_combined_sampler_and_view)
+ 		cmd_list->push_descriptors(api::shader_stage::pixel, _imgui_pipeline_layout, 0, api::descriptor_table_update { {}, 0, 0, 1, api::descriptor_type::sampler, &_imgui_sampler_state });
+ 
++	float previous_blur = 0.f;
+ 	int vtx_offset = 0, idx_offset = 0;
+ 	for (int n = 0; n < draw_data->CmdListsCount; ++n)
+ 	{
+@@ -5029,6 +5085,7 @@
+ 			if (cmd.UserCallback != nullptr)
+ 			{
+ 				cmd.UserCallback(draw_list, &cmd);
++                previous_blur = -1.f;
+ 				continue;
+ 			}
+ 
+@@ -5041,6 +5098,13 @@
+ 
+ 			cmd_list->bind_scissor_rects(0, 1, &scissor_rect);
+ 
++            if (_renderer_id >= 0xa000) {
++                const float blur = _vela_blur_srv != 0 && cmd.GetTexID() == _vela_blur_srv.handle ? 1.f : 0.f;
++                if (blur != previous_blur) {
++                    cmd_list->push_constants(api::shader_stage::pixel, _imgui_pipeline_layout, has_combined_sampler_and_view ? 1 : 2, 22, 1, &blur);
++                    previous_blur = blur;
++                }
++            }
+ 			const api::resource_view srv = { cmd.GetTexID() };
+ 			if (has_combined_sampler_and_view)
+ 			{
+@@ -5065,8 +5129,39 @@
+ 	cmd_list->end_debug_event();
+ #endif
+ }
++bool reshade::runtime::ensure_vela_blur()
++{
++    if (_vela_blur_srv != 0) return true;
++    if (_vela_blur_failed || _renderer_id < 0xa000 || _is_vr) return false;
++    _vela_blur_failed = true;
++    auto desc = _device->get_resource_desc(_device->get_resource_from_view(_back_buffer_targets[_back_buffer_resolved != 0 ? 0 : get_current_back_buffer_index() * 2]));
++    if ((desc.type != api::resource_type::texture_2d && desc.type != api::resource_type::surface) || desc.texture.samples != 1 || desc.texture.depth_or_layers != 1) return false;
++    desc.type = api::resource_type::texture_2d;
++    desc.texture.format = api::format_to_default_typed(_back_buffer_format, 0);
++    desc.heap = api::memory_heap::default_;
++    desc.usage = api::resource_usage::copy_dest | api::resource_usage::shader_resource;
++    desc.flags = api::resource_flags::none;
++    if (!_device->create_resource(desc, nullptr, api::resource_usage::shader_resource, &_vela_blur_texture)) {
++        log::message(log::level::warning, "Vela backdrop unavailable: texture allocation failed"); return false;
++    }
++    if (!_device->create_resource_view(_vela_blur_texture, api::resource_usage::shader_resource, api::resource_view_desc(desc.texture.format), &_vela_blur_srv)) {
++        _device->destroy_resource(_vela_blur_texture); _vela_blur_texture = {};
++        log::message(log::level::warning, "Vela backdrop unavailable: texture view failed"); return false;
++    }
++    _device->set_resource_name(_vela_blur_texture, "Vela GPU backdrop capture");
++    log::message(log::level::info, "Vela GPU backdrop ready: %ux%u format=%u color_space=%u", _width, _height, static_cast<uint32_t>(desc.texture.format), static_cast<uint32_t>(_back_buffer_color_space));
++    _vela_blur_failed = false;
++    return true;
++}
+ void reshade::runtime::destroy_imgui_resources()
+ {
++    if (_vela_blur_texture != 0) {
++        _graphics_queue->wait_idle();
++        _device->destroy_resource_view(_vela_blur_srv); _vela_blur_srv = {};
++        _device->destroy_resource(_vela_blur_texture); _vela_blur_texture = {};
++    }
++    _vela_blur_failed = false;
++
+ 	ImFontAtlas *const atlas = _imgui_context->IO.Fonts;
+ 	atlas->Clear();
+ 

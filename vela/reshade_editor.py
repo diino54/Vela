@@ -58,9 +58,22 @@ class ReShadeEditor(QWidget):
             ("Default", "default"),
         ):
             self.theme.addItem(title, value)
-        entries = [("theme", "UI Theme", "color", self.theme)]
+        self.blur_quality = NoWheelComboBox()
+        for title, value in (
+            ("Low · 9 samples", 0),
+            ("Balanced · 25 samples", 1),
+            ("High · 49 samples", 2),
+        ):
+            self.blur_quality.addItem(title, value)
+        self.blur_quality.currentIndexChanged.connect(self.changed)
+        entries = [
+            ("theme", "UI Theme", "color", self.theme),
+            ("blur_quality", "Vela · Blur Quality", "scale", self.blur_quality),
+        ]
         for name, title, icon in (
             ("alpha", "Global Alpha", "sun"),
+            ("blur", "Vela · Background Blur", "monitor"),
+            ("animation_duration", "Vela · Animation Duration", "refresh"),
             ("font", "Global Font Size", "session"),
             ("editor_font", "Editor Font Size", "session"),
             ("rounding", "Corner Rounding", "scale"),
@@ -80,11 +93,24 @@ class ReShadeEditor(QWidget):
             section, key, default, low, high = reshade_config.FIELDS[name]
             field.setRange(low, high)
             field.setDecimals(
-                2 if name in ("alpha", "font_scale", "fps_scale") else 0 if name == "hdr" else 1
+                2
+                if name in ("alpha", "font_scale", "fps_scale", "animation_duration")
+                else 0
+                if name == "hdr"
+                else 1
             )
             field.setSingleStep(
-                0.05 if name in ("alpha", "font_scale", "fps_scale") else 1 if name != "hdr" else 10
+                0.05
+                if name in ("alpha", "font_scale", "fps_scale", "animation_duration")
+                else 1
+                if name != "hdr"
+                else 10
             )
+            if name == "animation_duration":
+                field.setSuffix(" s")
+                field.setSingleStep(0.02)
+            if name == "blur":
+                field.setSuffix(" px")
             if name == "hdr":
                 field.setSuffix(" nits")
             self.controls[name] = field
@@ -92,6 +118,7 @@ class ReShadeEditor(QWidget):
             field.valueChanged.connect(self.changed)
         for name, title in (
             ("fps", "Overlay FPS Counter"),
+            ("animations", "Vela · UI Animations"),
             ("clock", "Clock"),
             ("frametime", "Frame Time"),
             ("preset_name", "Preset Name"),
@@ -154,6 +181,7 @@ class ReShadeEditor(QWidget):
     def values(self):
         return dict(
             theme=self.theme.currentData(),
+            blur_quality=self.blur_quality.currentData(),
             **{name: field.isChecked() for name, field in self.toggles.items()},
             **{name: field.value() for name, field in self.controls.items()},
         )
@@ -175,6 +203,9 @@ class ReShadeEditor(QWidget):
             self.original = raw
             self.theme.model().item(0).setEnabled(values["theme"] == "current")
             self.theme.setCurrentIndex(self.theme.findData(values["theme"]))
+            self.blur_quality.setCurrentIndex(
+                self.blur_quality.findData(int(values["blur_quality"]))
+            )
             for name, field in self.toggles.items():
                 field.setChecked(values[name])
             for name, field in self.controls.items():

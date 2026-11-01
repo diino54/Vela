@@ -81,7 +81,7 @@ HDR color conversion is surface-dependent and uses a private copy of the
 latest settings. It must not mutate the shared configuration snapshot. See
 `native/README.md`, `native/TESTING.md` and `native/color_state_test.cpp`.
 
-ReShade Configure delegates existing INI parsing/targeted atomic writes to `reshade_config.py` and 21 searchable editable metric cards to `reshade_editor.py`. The dialog coordinates loading, dirty state and explicit Save changes. Neither editor startup nor field changes writes game files. Numeric inputs and the alpha slider ignore wheel events.
+ReShade Configure delegates existing INI parsing/targeted atomic writes to `reshade_config.py` and 25 searchable editable metric cards to `reshade_editor.py`. The dialog coordinates loading, dirty state and explicit Save changes. Neither editor startup nor field changes writes game files. Numeric inputs and the alpha slider ignore wheel events.
 
 ## ReShade module boundaries
 

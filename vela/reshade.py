@@ -202,7 +202,13 @@ def rounded_runtime(bits):
 
 def rounded_available(bits):
     directory = Path(__file__).parent / "native/reshade"
-    return (directory / "BUILD.json").is_file() and (directory / f"ReShade{bits}.dll").is_file()
+    try:
+        metadata = json.loads((directory / "BUILD.json").read_text())
+        return (
+            str(bits) in metadata.get("sha256", {}) and (directory / f"ReShade{bits}.dll").is_file()
+        )
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 def install(plan, report=lambda message: None, download=fetch):
@@ -227,6 +233,10 @@ def install(plan, report=lambda message: None, download=fetch):
     files["ReShade.ini"] = (
         f"[GENERAL]\nEffectSearchPaths={effects}\nTextureSearchPaths={textures}\nPresetPath=.\\VelaPreset.ini\n"
     ).encode()
+    if plan.rounded_ui:
+        files["ReShade.ini"] += (
+            b"\n[VELA]\nBackgroundBlur=16\nBlurQuality=1\nAnimations=1\nAnimationDuration=0.24\n"
+        )
     if plan.vela_ui:
         files["ReShade.ini"] += vela_theme().encode()
     elif plan.rounded_ui:

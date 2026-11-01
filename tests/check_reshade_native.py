@@ -23,30 +23,60 @@ from vela.reshade_theme import vela_theme
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--work", type=Path, default=Path("/tmp/vela-reshade-work"))
-parser.add_argument("--api", choices=("opengl", "d3d11"), default="opengl")
+parser.add_argument("--api", choices=("opengl", "d3d11", "d3d12"), default="opengl")
 parser.add_argument(
     "--font-reset-check",
     action="store_true",
     help="Exercise explicit 13px/scale 1 through two actual swapchain resizes",
 )
+parser.add_argument(
+    "--visual-check",
+    action="store_true",
+    help="Export owned animation checkpoints and checker backdrop",
+)
+parser.add_argument("--blur", type=float, default=16)
+parser.add_argument("--quality", type=int, choices=(0, 1, 2), default=1)
+parser.add_argument("--hdr", choices=("sdr", "scrgb", "pq"), default="sdr")
 parser.add_argument("--bits", type=int, choices=(32, 64), default=64)
 parser.add_argument(
     "--dxvk",
     type=Path,
     help="Optional existing DXVK directory containing dxgi.dll/d3d11.dll; copied only into the private test prefix",
 )
+parser.add_argument(
+    "--vkd3d",
+    type=Path,
+    help="Existing VKD3D-Proton directory; copied only into our private test prefix",
+)
 parser.add_argument("--container", default="vela-reshade-build")
 parser.add_argument("--output", type=Path, default=Path("/tmp/vela-reshade-native-check.png"))
 args = parser.parse_args()
+if args.api == "opengl" and (args.hdr != "sdr" or args.visual_check):
+    parser.error("HDR/checkpoint exports require the D3D11 or D3D12 harness")
+if args.font_reset_check and args.api != "d3d11":
+    parser.error("The swapchain resize regression currently requires D3D11")
+if not 0 <= args.blur <= 32:
+    parser.error("Blur strength must be between 0 and 32")
 work = args.work.resolve()
 folder = work / f"owned-smoke-{args.api}-{args.bits}"
 folder.mkdir(exist_ok=True)
-source = "smoke_win.cpp" if args.api == "opengl" else "smoke_d3d11_win.cpp"
+source = (
+    "smoke_win.cpp"
+    if args.api == "opengl"
+    else "smoke_d3d12_win.cpp"
+    if args.api == "d3d12"
+    else "smoke_d3d11_win.cpp"
+)
 shutil.copyfile(root / "native/reshade" / source, folder / source)
+shutil.copyfile(root / "native/reshade/smoke_pixels.hpp", folder / "smoke_pixels.hpp")
 triple = "x86_64" if args.bits == 64 else "i686"
 arch = "x64" if args.bits == 64 else "x86"
 libraries = (
-    "user32.lib gdi32.lib opengl32.lib" if args.api == "opengl" else "user32.lib d3d11.lib dxgi.lib"
+    "user32.lib gdi32.lib opengl32.lib"
+    if args.api == "opengl"
+    else "user32.lib d3d12.lib dxgi.lib"
+    if args.api == "d3d12"
+    else "user32.lib d3d11.lib dxgi.lib"
 )
 script = folder / "compile.sh"
 script.write_text(
@@ -65,6 +95,7 @@ config = "[GENERAL]\nPerformanceMode=1\n" + vela_theme().replace(
 )
 if args.font_reset_check:
     assert args.api == "d3d11"
+config += f"\n[VELA]\nBackgroundBlur={args.blur}\nBlurQuality={args.quality}\nAnimations=1\nAnimationDuration=0.24\n"
 (folder / "ReShade.ini").write_text(config)
 prefix = work / f"wine-own-test-{args.bits}"
 prefix.mkdir(exist_ok=True)
@@ -75,13 +106,14 @@ env = dict(
     WINEPREFIX=str(prefix),
     WINEDLLOVERRIDES=f"{hook}=n,b",
     WINEDEBUG="-all",
+    DXVK_HDR="1",
 )
 # Only this harness uses this dedicated prefix; reset its server so child
 # process environment contains this run's ownership token. Never use a global prefix.
 subprocess.run(["wineserver", "-k"], env=env, check=False)
 if args.dxvk:
-    assert args.api == "d3d11" and args.bits == 64, (
-        "This smoke currently supports DXVK with D3D11 x64"
+    assert args.api in ("d3d11", "d3d12") and args.bits == 64, (
+        "This smoke supports DXVK DXGI with D3D11/D3D12 x64"
     )
     init_env = dict(env)
     init_env.pop("DISPLAY", None)
@@ -92,16 +124,27 @@ if args.dxvk:
         target.unlink(missing_ok=True)
         shutil.copyfile(args.dxvk / name, target)
     env["WINEDLLOVERRIDES"] = "dxgi,d3d11=n,b"
+if args.vkd3d:
+    assert args.api == "d3d12" and args.bits == 64
+    for name in ("d3d12.dll", "d3d12core.dll"):
+        target = prefix / "drive_c/windows/system32" / name
+        target.unlink(missing_ok=True)
+        shutil.copyfile(args.vkd3d / name, target)
+    env["WINEDLLOVERRIDES"] = "dxgi,d3d12,d3d12core=n,b"
+for old in folder.glob("visual-*"):
+    old.unlink()
 (folder / "owned-frame.ppm").unlink(missing_ok=True)
 process = subprocess.Popen(
     ["wine", str(folder / "VelaOwnedTest.exe")]
-    + (["--font-reset-check"] if args.font_reset_check else []),
+    + (["--font-reset-check"] if args.font_reset_check else [])
+    + (["--visual-check"] if args.visual_check else [])
+    + (["--hdr-" + args.hdr] if args.hdr != "sdr" else []),
     cwd=folder,
     env=env,
 )
 try:
     owner_pid = None
-    if args.api == "d3d11":
+    if args.api in ("d3d11", "d3d12"):
         # Read only a staging texture exported by our own harness, including
         # when Wine/DXVK presents through Wayland instead of X11.
         from PIL import Image, ImageStat
@@ -170,7 +213,7 @@ finally:
                 break
             time.sleep(0.1)
 log = (folder / "ReShade.log").read_text(errors="replace")
-assert "6.8.0.3" in log and "Recreated runtime environment" in log
+assert "6.8.0.4" in log and "Recreated runtime environment" in log
 assert "Another ReShade instance" not in log
 if args.font_reset_check:
     import re
@@ -180,6 +223,21 @@ if args.font_reset_check:
     assert all(float(base) == 13 and float(scale) == 1 for base, scale, _ in states), states
     assert any(surface.endswith("x1440") for _, _, surface in states), states
     print("PASS: font 13 / scale 1 preserved through actual GPU swapchain resets:", states)
+if args.blur > 0:
+    assert "Vela GPU backdrop ready" in log, "GPU backdrop was not initialized"
+    if args.hdr != "sdr":
+        import re
+
+        expected_space = 2 if args.hdr == "scrgb" else 3
+        assert re.search(
+            r"Vela GPU backdrop ready:[^\n]*color_space=" + str(expected_space), log
+        ), "Requested HDR color space was not active"
+if args.visual_check:
+    destination = args.output.parent / (args.output.stem + "-frames")
+    destination.mkdir(exist_ok=True)
+    for frame in folder.glob("visual-*"):
+        shutil.copyfile(frame, destination / frame.name)
+    print("Owned visual checkpoints:", destination)
 print(
     f"PASS: bundled {args.bits}-bit ReShade, {args.api}, runtime initialized and own process exited cleanly"
 )

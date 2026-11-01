@@ -16,6 +16,9 @@ from pathlib import Path
 from .reshade_theme import vela_theme
 
 FIELDS = {
+    "blur": ("VELA", "BackgroundBlur", 16, 0, 32),
+    "blur_quality": ("VELA", "BlurQuality", 1, 0, 2),
+    "animation_duration": ("VELA", "AnimationDuration", 0.24, 0.08, 0.8),
     "alpha": ("STYLE", "Alpha", 1.0, 0.1, 1.0),
     "font": ("STYLE", "FontSize", 13, 8, 32),
     "editor_font": ("STYLE", "EditorFontSize", 13, 8, 32),
@@ -33,13 +36,14 @@ FIELDS = {
 
 
 BOOL_FIELDS = {
-    "fps": ("ShowFPS", False),
-    "clock": ("ShowClock", False),
-    "frametime": ("ShowFrameTime", False),
-    "preset_name": ("ShowPresetName", False),
-    "screenshot_message": ("ShowScreenshotMessage", True),
-    "auto_save_preset": ("AutoSavePreset", True),
-    "variable_tabs": ("VariableListUseTabs", False),
+    "animations": ("VELA", "Animations", True),
+    "fps": ("OVERLAY", "ShowFPS", False),
+    "clock": ("OVERLAY", "ShowClock", False),
+    "frametime": ("OVERLAY", "ShowFrameTime", False),
+    "preset_name": ("OVERLAY", "ShowPresetName", False),
+    "screenshot_message": ("OVERLAY", "ShowScreenshotMessage", True),
+    "auto_save_preset": ("OVERLAY", "AutoSavePreset", True),
+    "variable_tabs": ("OVERLAY", "VariableListUseTabs", False),
 }
 
 
@@ -68,8 +72,8 @@ def load(path):
     values = {"theme": "current"}
     values.update(
         {
-            name: config.get("OVERLAY", key, fallback="1" if default else "0") == "1"
-            for name, (key, default) in BOOL_FIELDS.items()
+            name: config.get(section, key, fallback="1" if default else "0") == "1"
+            for name, (section, key, default) in BOOL_FIELDS.items()
         }
     )
     for name, (section, key, default, low, high) in FIELDS.items():
@@ -134,9 +138,9 @@ def save(path, original, values, baseline):
         if not math.isfinite(value) or not low <= value <= high:
             raise ValueError(f"{key} must be between {low} and {high}.")
         changes.setdefault(section, {})[key] = f"{value:g}"
-    for name, (key, default) in BOOL_FIELDS.items():
+    for name, (section, key, default) in BOOL_FIELDS.items():
         if values[name] != baseline[name]:
-            changes.setdefault("OVERLAY", {})[key] = "1" if values[name] else "0"
+            changes.setdefault(section, {})[key] = "1" if values[name] else "0"
     if values["theme"] != baseline["theme"]:
         if values["theme"] == "vela":
             theme = parse(vela_theme())

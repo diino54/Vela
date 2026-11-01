@@ -139,11 +139,11 @@ class ReShadePages:
         heading = QLabel("Interface & appearance")
         heading.setObjectName("sectionTitle")
         appearance.addWidget(heading)
-        self.rounded_ui = QCheckBox("Rounded outer window · Vela ReShade")
+        self.rounded_ui = QCheckBox("Vela ReShade · rounded UI, blur & animations")
         self.rounded_ui.setChecked(True)
         appearance.addWidget(self.rounded_ui)
         rounded_hint = QLabel(
-            "Uses Vela’s modified ReShade 6.8.0 runtime to round the entire docked window, including tabs and content. Disable to download the official runtime."
+            "Uses Vela’s modified runtime for whole-window rounding, GPU backdrop blur and UI animations. Disable to download the official runtime."
         )
         rounded_hint.setWordWrap(True)
         rounded_hint.setObjectName("fontMeta")

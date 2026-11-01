@@ -56,7 +56,7 @@ def main():
     parser.add_argument(
         "--skip-shaders",
         action="store_true",
-        help="Reuse previously compiled, unchanged upstream shaders",
+        help="Reuse previously compiled shaders (only after no shader-source changes)",
     )
     args = parser.parse_args()
     work = args.work.resolve()
@@ -75,16 +75,46 @@ def main():
     ).strip()
     if actual != IMGUI_REVISION:
         raise SystemExit("Unexpected ImGui revision: " + actual)
-    for patch in ("rounded-ui.patch", "clang-build.patch"):
+    visual_patch = ROOT / "native/reshade/visual-effects.patch"
+    already_visual = subprocess.run(
+        ["git", "apply", "--reverse", "--check", str(visual_patch)],
+        cwd=source,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if already_visual.returncode == 0:
+        run(["git", "apply", "--reverse", visual_patch], cwd=source)
+    for patch in ("rounded-ui.patch", "clang-build.patch", "visual-effects.patch"):
         apply_patch(source, ROOT / "native/reshade" / patch)
-    for header in ("vela_rounding.hpp", "vela_font_scale.hpp"):
+    for header in ("vela_rounding.hpp", "vela_font_scale.hpp", "vela_visual.hpp"):
         shutil.copyfile(ROOT / "native/reshade" / header, source / "source" / header)
+    shader_sources = ROOT / "native/reshade/shaders"
+    blur_functions = (shader_sources / "vela_blur.hlsl").read_text()
+    for template in shader_sources.iterdir():
+        if template.name == "vela_blur.hlsl":
+            continue
+        functions = blur_functions
+        if template.suffix == ".glsl":
+            functions = (
+                functions.replace("float4", "vec4")
+                .replace("float3", "vec3")
+                .replace("float2", "vec2")
+            )
+        code = template.read_text().replace("// @VELA_BLUR_FUNCTIONS@", functions)
+        (source / "res/shaders" / template.name).write_text(code)
     (source / "res/version.h").write_text(
-        '#pragma once\n#define VERSION_FULL 6.8.0.3\n#define VERSION_MAJOR 6\n#define VERSION_MINOR 8\n#define VERSION_REVISION 0\n#define VERSION_BUILD 3\n#define VERSION_STRING_FILE "6.8.0.3"\n#define VERSION_STRING_PRODUCT "6.8.0 VELA UNOFFICIAL"\n'
+        '#pragma once\n#define VERSION_FULL 6.8.0.4\n#define VERSION_MAJOR 6\n#define VERSION_MINOR 8\n#define VERSION_REVISION 0\n#define VERSION_BUILD 4\n#define VERSION_STRING_FILE "6.8.0.4"\n#define VERSION_STRING_PRODUCT "6.8.0 VELA UNOFFICIAL"\n'
     )
     run(["python3", ROOT / "scripts/reshade_sdk_case.py", work])
     if not args.skip_shaders:
-        sdk_bin = next((work / "msvc/kits/10/bin").glob("10.*/x64"))
+        sdk_bins = [
+            path
+            for path in (work / "msvc/kits/10/bin").glob("10.*/x64")
+            if (path / "fxc.exe").is_file()
+        ]
+        if not sdk_bins:
+            raise SystemExit("Windows SDK FXC is missing")
+        sdk_bin = max(sdk_bins, key=lambda path: tuple(map(int, path.parent.name.split("."))))
         prefix = work / "wine-shader-compiler"
         prefix.mkdir(exist_ok=True)
         env = dict(
@@ -122,11 +152,29 @@ def main():
                 cwd=shaders,
                 env=env,
             )
+        run(
+            [
+                "podman",
+                "exec",
+                args.container,
+                "glslangValidator",
+                "-V",
+                "-S",
+                "frag",
+                "-I/work/source/res/shaders",
+                "-Dfloat3=vec3",
+                "-Dfloat1=float",
+                "-Dfloat3x3=mat3",
+                "/work/source/res/shaders/imgui_ps_450.glsl",
+                "-o",
+                "/work/source/res/shaders/imgui_ps_450.spv",
+            ]
+        )
     destination = ROOT / "vela/native/reshade"
     destination.mkdir(parents=True, exist_ok=True)
     metadata = {
         "version": VERSION,
-        "variant": "Vela rounded outer window v3 (stable font scale)",
+        "variant": "Vela visual effects v4 (GPU backdrop and UI animation)",
         "upstream_revision": REVISION,
         "imgui_revision": IMGUI_REVISION,
         "sha256": {},
@@ -160,7 +208,7 @@ def main():
     existing = destination / "BUILD.json"
     if existing.exists():
         old = json.loads(existing.read_text())
-        if old.get("upstream_revision") == REVISION:
+        if old.get("upstream_revision") == REVISION and old.get("variant") == metadata["variant"]:
             for bits, checksum in old.get("sha256", {}).items():
                 binary = destination / f"ReShade{bits}.dll"
                 if (

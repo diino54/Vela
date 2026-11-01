@@ -137,4 +137,22 @@ Configure now offers editable two-column cards: UI theme (preserve current / Vel
 
 `reshade_config.py` reads at most 2 MiB, rejects symlinks/nonregular files, preserves unknown keys, comments, BOM and newline style, and changes only edited keys. Saving compares the current bytes to the loaded snapshot, then publishes through a same-directory temporary file with original mode. Concurrent external edits require reopening Configure. The ownership journal is intentionally not updated: an edited INI remains modified and is preserved by ordinary removal. Explicit complete removal still deletes it. Tests use temporary files, never user game configurations.
 
-Configure now contains 21 searchable cards. Added font/FPS scales, child/popup/control/grab/scrollbar/tab rounding, clock, frame time, preset name, screenshot notifications, auto-save preset and variable tabs. Search matches all entered words against the setting label/key and does not change dirty state. Numeric editors hide native spin arrows, retaining shared −/+ controls; wheel events still cannot change values. Saving keeps the current search query.
+Configure now contains 25 searchable cards. Added font/FPS scales, child/popup/control/grab/scrollbar/tab rounding, clock, frame time, preset name, screenshot notifications, auto-save preset and variable tabs. Search matches all entered words against the setting label/key and does not change dirty state. Numeric editors hide native spin arrows, retaining shared −/+ controls; wheel events still cannot change values. Saving keeps the current search query.
+
+## Vela visual runtime 6.8.0.4
+
+The custom runtime now provides GPU backdrop blur and reversible UI fades, plus
+short tab-content activation fades. Rounded UI, blur and animation are one
+explicit custom-runtime choice; the official runtime remains selectable.
+Configure has four additional controls (25 total): background blur strength,
+Low/Balanced/High sample quality, animation enable and duration. The same controls
+are available in the native ReShade Settings page under Vela visual effects.
+Keys are in [VELA], separate from upstream [STYLE]/[OVERLAY]. Explicit save
+preserves unrelated configuration. Existing game DLLs are not auto-replaced.
+
+This is independent of MangoHud blur. It samples a private GPU copy of the
+post-effect scene; UI remains sharp. HDR filtering uses linear-light values for
+scRGB/PQ/HLG. The owned tests verified SDR/scRGB/PQ through D3D11/DXVK and PQ
+through D3D12/VKD3D-Proton. See native/reshade/README.md for current implementation,
+quality costs, fallbacks, build instructions and regression cases. The current
+filter is full-resolution with 9/25/49 taps, not a downsampled multi-pass filter.

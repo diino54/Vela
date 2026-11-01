@@ -44,6 +44,28 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(cfg.load(path)[1]["alpha"], 0.5)
             self.assertTrue(cfg.load(path)[1]["fps"])
 
+    def test_native_visual_options_use_the_vela_section(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ReShade.ini"
+            path.write_text(vela_theme())
+            raw, values = cfg.load(path)
+            cfg.save(
+                path,
+                raw,
+                dict(values, blur=8, blur_quality=2, animations=False, animation_duration=0.4),
+                values,
+            )
+            config = cfg.parse(path.read_text())
+            self.assertEqual(config["VELA"]["BackgroundBlur"], "8")
+            self.assertEqual(config["VELA"]["BlurQuality"], "2")
+            self.assertEqual(config["VELA"]["Animations"], "0")
+            self.assertEqual(config["VELA"]["AnimationDuration"], "0.4")
+            self.assertEqual(config["OVERLAY"]["ShowFPS"], "0")
+            self.assertEqual(config["STYLE"]["Alpha"], "0.7")
+            loaded = cfg.load(path)[1]
+            self.assertFalse(loaded["animations"])
+            self.assertEqual(loaded["blur_quality"], 2)
+
     def test_extended_options_roundtrip(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ReShade.ini"

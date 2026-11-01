@@ -37,14 +37,14 @@ implementation history and [the architecture map](ARCHITECTURE.md) for ownership
   and manual EXE browsing. Failed scans report an error and can be retried.
 - Installation supports x86/x64 DirectX 9/10/11/12 and Windows OpenGL under
   Proton/Wine. Downloads are bounded; existing files are never overwritten.
-- Configure has a blue game/action card, 21 searchable settings and an explicit
+- Configure has a blue game/action card, 25 searchable settings and an explicit
   dirty-state Save changes action. Writes preserve unrelated INI keys/comments,
   BOM/newlines and presets; stale snapshots and special/symlink files are rejected.
 - Removal validates ownership. Ordinary removal preserves modifications;
   complete removal lists all owned/known ReShade files before confirmation.
 - Shared finite validation pulses replace continuous red animation. Queued
   style synchronization fixes the reproduced xcb step-switch hang.
-- The bundled unofficial ReShade 6.8.0.3 runtime rounds entire docked surfaces,
+- The bundled unofficial ReShade 6.8.0.4 runtime rounds entire docked surfaces,
   offers Detach/Move controls and preserves font scale across resource resets.
   The default Vela theme uses 13-point fonts, alpha 0.7, white text, blue accents,
   disabled FPS counter and 400-nit HDR overlay brightness.
@@ -80,3 +80,11 @@ implementation history and [the architecture map](ARCHITECTURE.md) for ownership
 - GL/Vulkan blur still depends on supported surface/present arrangements.
 - Google metadata endpoints may change; bundled metadata/cache is the fallback.
 - No commit, push, game-file replacement or native rebuild is part of this refactor.
+
+- Vela ReShade 6.8.0.4 adds post-effect GPU backdrop blur, reversible open/close
+  fades and tab-content activation fades. Configure/in-game Settings expose
+  blur strength, sample quality, animation enable/duration. Both x86/x64 DLLs
+  were rebuilt; existing game DLLs still require reinstallation. Owned tests
+  passed OpenGL x86/x64, D3D11/DXVK SDR/scRGB/PQ, D3D12/VKD3D PQ, animation
+  endpoints/bounds and real swapchain reset/font-scale checks. No game test or
+  performance guarantee is implied. MangoHud HDR blur remains disabled.

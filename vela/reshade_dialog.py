@@ -194,7 +194,7 @@ class ReShadeDialog(ReShadePages, FrostedModal):
             self.editor.load(folder / "ReShade.ini")
             self.editor.show()
             self.editor_status.setText(
-                "Edit values, then Save changes. Restart the game to apply them. Whole-window rounding requires the Vela runtime."
+                "Edit values, then Save changes. Restart the game to apply them. Whole-window rounding requires the Vela runtime; blur and animations require Vela ReShade 6.8.0.4+."
             )
         except (OSError, ValueError, configparser.Error) as error:
             self.editor.hide()

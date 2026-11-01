@@ -128,3 +128,11 @@ without exhausting the interpreter's reference count. The CI workflow uses the
 shared dependency list and declares the native Qt/OpenGL/QtNetwork libraries.
 All workflow checks passed in an isolated Python 3.11 environment after this fix.
 A new hosted GitHub Actions run is still needed after committing/pushing it.
+
+Native visual tests: compile native/reshade/visual_test.cpp with the pinned
+ImGui sources, then run owned checker smokes with --visual-check and optional
+--hdr scrgb/pq. Use --blur 0 for the comparison run. The frame verification
+script accepts --blur/--no-blur checkpoint directories and repeated --hdr dirs.
+The harness atomically exports its own buffers; never capture unrelated windows.
+DXVK/VKD3D input libraries are copied only into the private Wine test prefix.
+The build container additionally needs glslang for the Vulkan shader variant.
