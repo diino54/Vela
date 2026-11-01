@@ -1,5 +1,9 @@
 # Visual design and interaction contract
 
+Read [the UI/UX philosophy](UI_UX_PHILOSOPHY.md) for product intent, interaction
+principles and extension rules. This file records implemented geometry, visual
+values and screen-specific behavior.
+
 These are existing design decisions, not proposed features. Screenshots below
 are offscreen renders of the actual widgets, not mockups.
 
@@ -154,7 +158,7 @@ location and installation state. Its folder, pen and trash icons open the game
 directory, open ReShade.ini, and begin the separately confirmed removal flow.
 Trash is available only for Vela-managed installations.
 
-Below it, 21 editable cards use two columns and a search field. Matching cards
+Below it, 25 editable cards use two columns and a search field. Matching cards
 repack without changing values or dirty state. Native number-input arrows are
 hidden; shared −/+ controls remain. Numeric inputs and the alpha slider ignore
 wheel events. Save changes pulses only when values differ from the loaded buffer.
@@ -191,3 +195,8 @@ is explicitly labeled. Copy report exports the full plain-text snapshot.
 
 The report describes desktop state, not a game's PQ/scRGB swapchain, calibration
 or active HDR rendering. Diagnostic reads do not change display settings.
+
+ReShade v4 Configure also exposes Vela-prefixed blur/quality and animation
+controls. Quality is a descriptive combo; strength/duration retain the same
+wheel-safe number controls. Whole-window rounding and visual effects require
+the bundled custom runtime; the official-runtime option remains separate.

@@ -42,6 +42,7 @@ python3 scripts/install.py --uninstall
 # Development
 
 See the [architecture map](docs/ARCHITECTURE.md),
+[UI/UX philosophy](docs/UI_UX_PHILOSOPHY.md),
 [visual design guide](docs/UI_DESIGN.md),
 [development and testing instructions](docs/DEVELOPMENT.md), and
 [current implementation state](docs/STATE.md).
