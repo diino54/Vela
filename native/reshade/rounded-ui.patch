@@ -1,0 +1,57 @@
+diff --git a/source/runtime_gui.cpp b/source/runtime_gui.cpp
+index 3217ae0..fd4b962 100644
+--- a/source/runtime_gui.cpp
++++ b/source/runtime_gui.cpp
+@@ -6,6 +6,8 @@
+ #if RESHADE_GUI
+ 
+ #include "runtime.hpp"
++#include "vela_rounding.hpp"
++#include "vela_font_scale.hpp"
+ #include "runtime_internal.hpp"
+ #include "version.h"
+ #include "dll_log.hpp"
+@@ -1029,6 +1031,7 @@ void reshade::runtime::draw_gui()
+ 		}
+ 	}
+ 
++	vela_rounding::process_detach_requests(*_imgui_context);
+ 	ImGui::NewFrame();
+ 
+ 	// Reset input source to mouse when the cursor is moved
+@@ -1381,7 +1384,10 @@ void reshade::runtime::draw_gui()
+ 		for (const std::pair<std::string, void(runtime:: *)()> &widget : overlay_callbacks)
+ 		{
+ 			if (ImGui::Begin(widget.first.c_str(), nullptr, ImGuiWindowFlags_NoFocusOnAppearing)) // No focus so that window state is preserved between opening/closing the GUI
++			{
++				vela_rounding::panel_controls();
+ 				(this->*widget.second)();
++			}
+ 			ImGui::End();
+ 		}
+ 
+@@ -1496,6 +1502,8 @@ void reshade::runtime::draw_gui()
+ 
+ 	// Render ImGui widgets and windows
+ 	ImGui::Render();
++	if (_show_overlay)
++		vela_rounding::apply(*_imgui_context, *ImGui::GetDrawData(), _imgui_context->Style.WindowRounding);
+ 
+ 	if (_primary_input_handler && _input != nullptr)
+ 	{
+@@ -4687,9 +4695,12 @@ void reshade::runtime::draw_code_editor(editor_instance &instance)
+ 
+ bool reshade::runtime::init_imgui_resources()
+ {
+-	// Adjust default font size based on the vertical resolution
+-	if (_font_size == 13.0f)
+-		_imgui_context->Style.FontScaleMain = _height >= 2160 ? 2.0f : _height >= 1440 ? 1.5f : 1.0f;
++	// Preserve resolved font scale through swapchain/focus/HDR resource resets.
++	float configured_scale = 0.0f;
++	const bool explicit_scale = ini_file::load_cache(_config_path).get("STYLE", "FontScale", configured_scale) && std::isfinite(configured_scale) && configured_scale > 0.0f;
++	ImGuiStyle &style = _imgui_context->Style;
++	style.FontScaleMain = vela_font_scale::on_resource_init(style.FontScaleMain, _font_size, _height, explicit_scale, _imgui_context->FrameCount);
++	log::message(log::level::info, "Vela font state: base=%.2f scale=%.3f dpi=%.3f frame=%d surface=%ux%u explicit=%d", _font_size, style.FontScaleMain, style.FontScaleDpi, _imgui_context->FrameCount, _width, _height, explicit_scale ? 1 : 0);
+ 
+ 	const bool has_combined_sampler_and_view = _device->check_capability(api::device_caps::sampler_with_resource_view);
+ 

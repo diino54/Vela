@@ -1,0 +1,31 @@
+name: Python quality
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libopengl0 libxkbcommon0 libx11-6 libdbus-1-3 libfontconfig1 libgssapi-krb5-2
+          python -m pip install -r requirements-dev.txt
+      - run: python -m pip check
+      - run: ruff check vela scripts tests
+      - run: ruff format --check vela scripts tests
+      - run: python tests/check_qt_runtime.py
+      - run: python -m unittest discover -s tests -q
+      - run: python tests/check_ui.py
+      - run: python tests/check_profile_switch.py
+      - run: python tests/check_reshade.py
+      - run: python tests/check_hdr.py

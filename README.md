@@ -1,0 +1,52 @@
+# Vela
+<img src="https://github.com/diino54/Vela/blob/main/vela/assets/preview.png">
+
+<br/>
+<br/>
+
+# IMPORTANT!
+Use `vela-mangohud %command%` instead of `mangohud %command%`, otherwise some functionalities won't work.
+
+# Description
+An app built entirely through vibe coding with GPT-6.1 Sol Light.
+<br/>
+I have no damn clue how the code works, but it works and serves me well 👍
+
+# Functionalities & Improvements
+<img width="345" height="198" alt="ui_improvements" src="https://github.com/user-attachments/assets/67c1d030-5816-43ca-b159-47665dd47a52" />
+
+*Real-time background blur in S.T.A.L.K.E.R. 2.
+The game image behind the HUD is blurred while text and graphs remain sharp.
+Background blur is experimental. Compatibility depends on the graphics API and swapchain format.*
+
+Vela offers more UI customization options, including real-time background blur, padding, borders, shadows, rounded corners, and subtle background noise.
+
+# Requirements
+* Python **(3.11 or newer)**
+* PySide6 **(6.6 or newer, except 6.12.0)** — see [runtime dependencies](requirements.txt).
+* MangoHud
+* LSFG-VK and Vulkan Loader **(optional)**
+
+# Installation
+`install.py` is in the **scripts** directory.
+
+Install:
+```
+python3 scripts/install.py
+```
+Uninstall:
+```
+python3 scripts/install.py --uninstall
+```
+
+# Development
+
+See the [architecture map](docs/ARCHITECTURE.md),
+[visual design guide](docs/UI_DESIGN.md),
+[development and testing instructions](docs/DEVELOPMENT.md), and
+[current implementation state](docs/STATE.md).
+Agent/contributor entry point: [AGENTS.md](AGENTS.md).
+
+Python quality checks use Ruff and the isolated test suite. See
+[development checks](docs/DEVELOPMENT.md#python-quality-and-fast-checks) and the
+[refactor audit](docs/AUDIT.md) for findings and validation limits.

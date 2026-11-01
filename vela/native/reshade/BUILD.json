@@ -1,0 +1,10 @@
+{
+  "version": "6.8.0",
+  "variant": "Vela rounded outer window v3 (stable font scale)",
+  "upstream_revision": "18deaa52de0c425a78b329e9cb3c497281cd00ec",
+  "imgui_revision": "3912b3d9a9c1b3f17431aebafd86d2f40ee6e59c",
+  "sha256": {
+    "64": "35957be11f2f478627f94bfb71ebd2cb6df175143545248a28f2b2a351e6119f",
+    "32": "562c61c081e70a170d85016425be9ab8c515018bb76d48248d299404645ef84e"
+  }
+}
